@@ -1,0 +1,9 @@
+{
+  "name": "giwa-mainnet-watch",
+  "version": "1.0.0",
+  "description": "GIWA mainnet açılış sinyallerini izleyip Telegram'a bildirim gönderen bot",
+  "type": "module",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=20" }
+}
