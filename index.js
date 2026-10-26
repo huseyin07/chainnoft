@@ -5,7 +5,7 @@
 //   TELEGRAM_BOT_TOKEN  (zorunlu)  BotFather'ın verdiği token
 //   TELEGRAM_CHAT_ID    (isteğe bağlı) Boşsa bota ilk /start yazan sohbet kaydedilir
 //   GITHUB_TOKEN        (önerilir)  Yetkisiz public okuma token'ı; GitHub limitine takılmamak için
-//   ETH_RPC_URL         (isteğe bağlı) Ethereum ana ağı RPC (Alchemy/Infura) — L1 sinyalleri için
+//   ETH_RPC_URL         (isteğe bağlı) Ethereum ana ağı RPC. Boşsa ücretsiz publicnode kullanılır
 //   DATA_DIR            (isteğe bağlı) Durum dosyasının klasörü. Railway'de Volume'u /data'ya bağla.
 //   TZ_OFFSET_HOURS     (isteğe bağlı) Günlük "hayattayım" mesajı saati için, varsayılan 3 (İstanbul)
 
@@ -19,7 +19,7 @@ if (!TOKEN) {
   process.exit(1);
 }
 const GH_TOKEN = process.env.GITHUB_TOKEN || "";
-const ETH_RPC = process.env.ETH_RPC_URL || "";
+const ETH_RPC = process.env.ETH_RPC_URL || "https://ethereum-rpc.publicnode.com";
 const DATA_DIR = process.env.DATA_DIR || "./data";
 const TZ = Number(process.env.TZ_OFFSET_HOURS ?? 3);
 const STATE_FILE = path.join(DATA_DIR, "state.json");
@@ -29,6 +29,17 @@ const SEPOLIA_CHAIN_ID = 91342;
 const SEPOLIA_BATCHER = "0x1caaaa58002a7e8b4c6f427ac2c943767b4d6cd7"; // giwa-io/node sepolia-rollup.json
 const DOCS_URL = "https://docs.giwa.io/giwa-chain/en/get-started/connect-to-giwa.md";
 const DOCS_DEV_TEXT = "GIWA Mainnet is currently under development";
+const DOCS_INDEX_URL = "https://docs.giwa.io/llms.txt";
+const UPBIT_NOTICES_URL = "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=30&category=all";
+const GIWA_WORDS = /giwa|기와/i;
+// RPC sağlayıcıları ağı genelde herkesten önce alır. Bu adreslerin cevabı değişirse haber ver.
+const PROVIDER_PROBES = [
+  "https://giwa-mainnet.g.alchemy.com/v2/probe",
+  "https://giwa.g.alchemy.com/v2/probe",
+];
+// OP Stack L2 predeploy'ları — her gerçek OP Stack zincirinde bu adreslerde kod olur
+const L1BLOCK = "0x4200000000000000000000000000000000000015";
+const L2_TO_L1_PASSER = "0x4200000000000000000000000000000000000016";
 
 // Mainnet açılınca büyük ihtimalle kullanılacak alan adları (giwa.io, sepolia-rpc.giwa.io kalıbından)
 const RPC_CANDIDATES = [
@@ -190,11 +201,9 @@ const WATCHERS = [
         let id;
         try { id = parseInt(await rpc(url, "eth_chainId"), 16); } catch { continue; }
         if (!Number.isFinite(id) || id === SEPOLIA_CHAIN_ID) continue;
-        let block = "?";
-        try { block = parseInt(await rpc(url, "eth_blockNumber"), 16); } catch {}
-        const known = state.seen.mainnetChainId;
-        const match = known ? (known === id ? "✅ GitHub'daki resmi config ile EŞLEŞİYOR" : `❌ GitHub config'teki chain ID ${known} ile EŞLEŞMİYOR — dikkat!`) : "ℹ️ GitHub'da henüz resmi config yok, çapraz kontrol yapılamadı";
-        fireOnce(`rpc:${url}:${id}`, `GIWA MAINNET RPC CANLI — resmi alan adında cevap veriyor:\n<code>${url}</code>\nChain ID: <b>${id}</b>\nBlok: ${block}\n${match}`);
+        if (state.fired[`rpc:${url}:${id}`]) continue;
+        const v = await verifyRpc(url, id);
+        fireOnce(`rpc:${url}:${id}`, `GIWA MAINNET RPC CANLI — resmi alan adında cevap veriyor:\n<code>${url}</code>\nChain ID: <b>${id}</b>\n\n<b>Doğrulama (${v.score}/${v.total}):</b>\n${v.lines.join("\n")}`);
       }
     },
   },
@@ -257,6 +266,17 @@ const WATCHERS = [
     async run() {
       const repos = await gh("orgs/giwa-io/repos?per_page=100&sort=created");
       if (!Array.isArray(repos)) throw new Error("depo listesi alınamadı");
+      const pushed = Object.fromEntries(repos.map((r) => [r.full_name, r.pushed_at]));
+      const prevPushed = state.seen.orgPushed;
+      state.seen.orgPushed = pushed;
+      if (prevPushed) for (const [name, at] of Object.entries(pushed)) {
+        if (!prevPushed[name] || prevPushed[name] === at || name === "giwa-io/node") continue;
+        const commits = (await gh(`repos/${name}/commits?per_page=10&since=${encodeURIComponent(prevPushed[name])}`)) || [];
+        const msgs = commits.map((c) => c.commit.message.split("\n")[0]);
+        const hot = msgs.filter((m) => /mainnet|chain ?id|launch|genesis|deploy/i.test(m));
+        if (hot.length) fireOnce(`push:${name}:${at}`, `${esc(name)} deposuna mainnet ile ilgili commit:\n${hot.map((m) => `• ${esc(m)}`).join("\n")}\nhttps://github.com/${name}/commits`);
+        else if (msgs.length) notify(`${esc(name)} güncellendi:\n${msgs.slice(0, 5).map((m) => `• ${esc(m)}`).join("\n")}`);
+      }
       const added = diffSet("orgRepos", repos.map((r) => r.full_name));
       for (const name of added) {
         const r = repos.find((x) => x.full_name === name);
@@ -296,7 +316,7 @@ const WATCHERS = [
     },
   },
   {
-    id: "l1", name: "Ethereum L1 (batcher + köprü)", everySec: 300, enabled: () => !!ETH_RPC,
+    id: "l1", name: "Ethereum L1 (batcher + köprü)", everySec: 300,
     async run() {
       const nonce = parseInt(await rpc(ETH_RPC, "eth_getTransactionCount", [SEPOLIA_BATCHER, "latest"]), 16);
       const prev = state.seen.batcherNonce;
@@ -309,7 +329,96 @@ const WATCHERS = [
       }
     },
   },
+  {
+    id: "upbit", name: "Upbit duyuruları (GIWA/기와)", everySec: 120,
+    async run() {
+      const r = await http(UPBIT_NOTICES_URL, { headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" } });
+      if (!r.ok) throw new Error(`Upbit HTTP ${r.status}`);
+      const j = await r.json();
+      const notices = [];
+      (function walk(o) { if (Array.isArray(o)) o.forEach(walk); else if (o && typeof o === "object") { if (typeof o.title === "string") notices.push(o); else Object.values(o).forEach(walk); } })(j);
+      if (!notices.length) throw new Error("Upbit duyuru listesi okunamadı (format değişmiş olabilir)");
+      const giwa = notices.filter((n) => GIWA_WORDS.test(n.title));
+      const added = diffSet("upbitGiwa", giwa.map((n) => String(n.id ?? n.title)));
+      for (const key of added) {
+        const n = giwa.find((x) => String(x.id ?? x.title) === key);
+        const link = n.id ? `https://upbit.com/service_center/notice?id=${n.id}` : "https://upbit.com/service_center/notice";
+        fireOnce(`upbit:${key}`, `Upbit'te GIWA geçen YENİ resmi duyuru:\n<b>${esc(n.title)}</b>\n${link}`);
+      }
+    },
+  },
+  {
+    id: "docs-index", name: "docs.giwa.io sayfa listesi", everySec: 300,
+    async run() {
+      const r = await http(DOCS_INDEX_URL, { headers: { "User-Agent": "giwa-mainnet-watch" } });
+      if (!r.ok) throw new Error(`llms.txt HTTP ${r.status}`);
+      const body = await r.text();
+      const abs = [...body.matchAll(/https:\/\/docs\.giwa\.io\/[^\s)"'<>]+/g)].map((m) => m[0]);
+      const rel = [...body.matchAll(/\]\((\/[^\s)"'<>]+)\)/g)].map((m) => "https://docs.giwa.io" + m[1]);
+      const urls = [...new Set([...abs, ...rel])].filter((u) => !u.endsWith("llms.txt"));
+      if (!urls.length) throw new Error("doküman listesi boş");
+      const added = diffSet("docsPages", urls);
+      if (!added.length) return;
+      const hot = added.filter((u) => /mainnet/i.test(u));
+      for (const u of hot) fireOnce(`docsidx:${u}`, `Resmi dokümana MAINNET sayfası eklendi:\n${u}`);
+      const rest = added.filter((u) => !hot.includes(u));
+      if (rest.length) notify(`docs.giwa.io yeni sayfalar:\n${rest.slice(0, 10).map((u) => `• ${u}`).join("\n")}`);
+    },
+  },
+  {
+    id: "providers", name: "RPC sağlayıcıları (Alchemy)", everySec: 600,
+    async run() {
+      for (const url of PROVIDER_PROBES) {
+        let sig;
+        try {
+          const r = await http(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }) }, 15000);
+          sig = `${r.status}:${(await r.text()).slice(0, 120).replace(/\s+/g, " ")}`;
+        } catch (e) { sig = `ERR:${e.cause?.code || e.name}`; }
+        const key = `prov:${url}`;
+        const prev = state.seen[key];
+        state.seen[key] = sig;
+        if (prev && prev !== sig) notify(`RPC sağlayıcı adresinin cevabı DEĞİŞTİ — ağ sağlayıcıya eklenmiş olabilir:\n<code>${esc(url.replace("/v2/probe", ""))}</code>\nÖnce: ${esc(prev)}\nŞimdi: ${esc(sig)}`);
+      }
+    },
+  },
 ];
+
+// Bulunan bir RPC'nin gerçekten Ethereum ana ağına bağlı bir OP Stack zinciri olduğunu kontrol eder
+async function verifyRpc(url, id) {
+  const lines = []; let score = 0; const total = 5;
+  const ok = (cond, yes, no) => { if (cond) score++; lines.push((cond ? "✅ " : "❌ ") + (cond ? yes : no)); };
+  // 1) Alan adı resmi mi
+  ok(/^https:\/\/[a-z0-9.-]+\.giwa\.io$/i.test(url), "Alan adı resmi giwa.io altında", "Alan adı giwa.io değil!");
+  // 2) OP Stack predeploy kontratları var mı
+  let isOp = false;
+  try {
+    const [a, b] = await Promise.all([rpc(url, "eth_getCode", [L1BLOCK, "latest"]), rpc(url, "eth_getCode", [L2_TO_L1_PASSER, "latest"])]);
+    isOp = a?.length > 2 && b?.length > 2;
+  } catch {}
+  ok(isOp, "OP Stack sistem kontratları mevcut", "OP Stack sistem kontratları yok — GIWA olamaz");
+  // 3) L1Block kontratı Ethereum ANA AĞINI mı takip ediyor (hash birebir eşleşmeli)
+  let anchored = false, l1n = null;
+  try {
+    l1n = parseInt(await rpc(url, "eth_call", [{ to: L1BLOCK, data: "0x8381f58a" }, "latest"]), 16);
+    const l1h = (await rpc(url, "eth_call", [{ to: L1BLOCK, data: "0x09bd5a60" }, "latest"]))?.toLowerCase();
+    const real = await rpc(ETH_RPC, "eth_getBlockByNumber", ["0x" + l1n.toString(16), false]);
+    anchored = !!real && real.hash?.toLowerCase() === l1h;
+  } catch {}
+  ok(anchored, `Ethereum ana ağına bağlı (L1 blok ${l1n} hash'i birebir eşleşiyor)`, `Ethereum ana ağı hash'i eşleşmedi${l1n ? ` (L1 blok ${l1n})` : ""} — testnet ya da sahte zincir olabilir`);
+  // 4) Zincir üretiyor mu (blok ilerliyor mu)
+  let moving = false, b1 = null;
+  try {
+    b1 = parseInt(await rpc(url, "eth_blockNumber"), 16);
+    await sleep(4000);
+    moving = parseInt(await rpc(url, "eth_blockNumber"), 16) > b1;
+  } catch {}
+  ok(moving, `Blok üretiyor (şu an ${b1})`, `Blok ilerlemiyor${b1 !== null ? ` (blok ${b1})` : ""}`);
+  // 5) Resmi config ile chain ID
+  const known = state.seen.mainnetChainId;
+  if (known) ok(known === id, "Chain ID GitHub'daki resmi config ile eşleşiyor", `Chain ID resmi config'teki ${known} ile EŞLEŞMİYOR`);
+  else lines.push("➖ GitHub'da henüz resmi config yok, chain ID çapraz kontrolü bekliyor");
+  return { score, total: known ? total : total - 1, lines };
+}
 
 // Keşfedilen giwa.io adreslerini RPC izleyicisine ekler (testnet ve web sayfaları hariç)
 function addRpcCandidate(url) {
