@@ -185,7 +185,8 @@ const WATCHERS = [
   {
     id: "rpc", name: "Mainnet RPC adresleri", everySec: 60,
     async run() {
-      for (const url of RPC_CANDIDATES) {
+      const extra = (state.seen.extraRpc || []).filter((u) => !RPC_CANDIDATES.includes(u));
+      for (const url of [...RPC_CANDIDATES, ...extra]) {
         let id;
         try { id = parseInt(await rpc(url, "eth_chainId"), 16); } catch { continue; }
         if (!Number.isFinite(id) || id === SEPOLIA_CHAIN_ID) continue;
@@ -193,7 +194,7 @@ const WATCHERS = [
         try { block = parseInt(await rpc(url, "eth_blockNumber"), 16); } catch {}
         const known = state.seen.mainnetChainId;
         const match = known ? (known === id ? "✅ GitHub'daki resmi config ile EŞLEŞİYOR" : `❌ GitHub config'teki chain ID ${known} ile EŞLEŞMİYOR — dikkat!`) : "ℹ️ GitHub'da henüz resmi config yok, çapraz kontrol yapılamadı";
-        fireOnce(`rpc:${url}:${id}`, `Resmi alan adında RPC cevap veriyor:\n<code>${url}</code>\nChain ID: <b>${id}</b>\nBlok: ${block}\n${match}`);
+        fireOnce(`rpc:${url}:${id}`, `GIWA MAINNET RPC CANLI — resmi alan adında cevap veriyor:\n<code>${url}</code>\nChain ID: <b>${id}</b>\nBlok: ${block}\n${match}`);
       }
     },
   },
@@ -205,6 +206,7 @@ const WATCHERS = [
       if (await resolves(`zz-${Date.now().toString(36)}.giwa.io`)) { state.seen.dnsWildcard = true; return; }
       const live = [];
       for (const host of DNS_CANDIDATES) if (await resolves(host)) live.push(host);
+      for (const h of live) addRpcCandidate(`https://${h}`);
       const firstRun = !state.seen.dnsLive;
       const added = diffSet("dnsLive", live);
       if (firstRun) return; // bot başlarken zaten var olanlar sinyal değil
@@ -220,6 +222,7 @@ const WATCHERS = [
       if (text.length < 200) throw new Error("docs içeriği beklenenden kısa");
       if (!text.includes(DOCS_DEV_TEXT)) fireOnce("docs:dev-text-gone", `docs.giwa.io sayfasında "Mainnet geliştiriliyor" yazısı KALDIRILDI.\n${DOCS_URL.replace(".md", "")}`);
       const ids = [...text.matchAll(/Chain ID[^0-9]{0,80}?(\d{3,12})/gi)].map((m) => Number(m[1])).filter((n) => n !== SEPOLIA_CHAIN_ID);
+      for (const m of text.matchAll(/https:\/\/[a-z0-9.-]+\.giwa\.io/gi)) addRpcCandidate(m[0]);
       for (const id of new Set(ids)) fireOnce(`docs:chainid:${id}`, `Resmi dokümanda yeni Chain ID göründü: <b>${id}</b>\n${DOCS_URL.replace(".md", "")}`);
     },
   },
@@ -283,6 +286,7 @@ const WATCHERS = [
       if (!r.ok) throw new Error(`crt.sh HTTP ${r.status}`);
       const rows = await r.json();
       const names = [...new Set(rows.flatMap((x) => String(x.name_value).split("\n")).map((s) => s.trim().toLowerCase()).filter((s) => s.endsWith("giwa.io")))].sort();
+      for (const n of names) if (!n.startsWith("*")) addRpcCandidate(`https://${n}`);
       const added = diffSet("certNames", names);
       if (added.length) {
         const hot = added.filter((n) => /mainnet|rpc|sequencer|explorer|bridge/.test(n) && !/sepolia|testnet/.test(n));
@@ -306,6 +310,15 @@ const WATCHERS = [
     },
   },
 ];
+
+// Keşfedilen giwa.io adreslerini RPC izleyicisine ekler (testnet ve web sayfaları hariç)
+function addRpcCandidate(url) {
+  const u = url.toLowerCase().replace(/\/+$/, "");
+  if (!/^https:\/\/[a-z0-9.-]+\.giwa\.io$/.test(u)) return;
+  if (/sepolia|testnet|docs\.|www\.|snapshot|playground|faucet/.test(u)) return;
+  state.seen.extraRpc ??= [];
+  if (!state.seen.extraRpc.includes(u) && !RPC_CANDIDATES.includes(u)) state.seen.extraRpc.push(u);
+}
 
 async function describeRollup(sha, file) {
   try {
