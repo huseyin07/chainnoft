@@ -30,7 +30,10 @@ const SEPOLIA_BATCHER = "0x1caaaa58002a7e8b4c6f427ac2c943767b4d6cd7"; // giwa-io
 const DOCS_URL = "https://docs.giwa.io/giwa-chain/en/get-started/connect-to-giwa.md";
 const DOCS_DEV_TEXT = "GIWA Mainnet is currently under development";
 const DOCS_INDEX_URL = "https://docs.giwa.io/llms.txt";
-const UPBIT_NOTICES_URL = "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=30&category=all";
+const UPBIT_NOTICE_URLS = [
+  "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=30&category=all",
+  "https://api-manager.upbit.com/api/v1/notices?page=1&per_page=30",
+];
 const GIWA_WORDS = /giwa|기와/i;
 // RPC sağlayıcıları ağı genelde herkesten önce alır. Bu adreslerin cevabı değişirse haber ver.
 const PROVIDER_PROBES = [
@@ -332,9 +335,22 @@ const WATCHERS = [
   {
     id: "upbit", name: "Upbit duyuruları (GIWA/기와)", everySec: 120,
     async run() {
-      const r = await http(UPBIT_NOTICES_URL, { headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" } });
-      if (!r.ok) throw new Error(`Upbit HTTP ${r.status}`);
-      const j = await r.json();
+      const headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+        "Origin": "https://upbit.com",
+        "Referer": "https://upbit.com/service_center/notice",
+      };
+      let j = null, last = "";
+      for (const url of UPBIT_NOTICE_URLS) {
+        try {
+          const r = await http(url, { headers });
+          if (!r.ok) { last = `HTTP ${r.status}`; continue; }
+          j = await r.json(); break;
+        } catch (e) { last = e.message; }
+      }
+      if (!j) throw new Error(`Upbit duyuruları alınamadı (${last})`);
       const notices = [];
       (function walk(o) { if (Array.isArray(o)) o.forEach(walk); else if (o && typeof o === "object") { if (typeof o.title === "string") notices.push(o); else Object.values(o).forEach(walk); } })(j);
       if (!notices.length) throw new Error("Upbit duyuru listesi okunamadı (format değişmiş olabilir)");
