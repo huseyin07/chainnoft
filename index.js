@@ -333,7 +333,7 @@ const WATCHERS = [
     },
   },
   {
-    id: "upbit", name: "Upbit duyuruları (GIWA/기와)", everySec: 120,
+    id: "upbit", name: "Upbit duyuruları (GIWA/기와)", everySec: 120, quiet: true, // Upbit bazı sunucu IP'lerini engelliyor; hata bildirimi atma
     async run() {
       const headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
@@ -472,7 +472,7 @@ async function runWatcher(w) {
     state.errStreak[w.id] = (state.errStreak[w.id] || 0) + 1;
     console.error(`[${w.id}]`, e.message);
     // Kısa kesintileri sessiz geç; 10 kez üst üste düşerse haber ver
-    if (state.errStreak[w.id] === 10) notify(`"${w.name}" izleyicisi 10 kez üst üste hata verdi: ${esc(e.message)}`);
+    if (state.errStreak[w.id] === 10 && !w.quiet) notify(`"${w.name}" izleyicisi 10 kez üst üste hata verdi: ${esc(e.message)}`);
   }
   saveState();
 }
