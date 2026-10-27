@@ -31,7 +31,9 @@ const DOCS_URL = "https://docs.giwa.io/giwa-chain/en/get-started/connect-to-giwa
 const DOCS_DEV_TEXT = "GIWA Mainnet is currently under development";
 const DOCS_INDEX_URL = "https://docs.giwa.io/llms.txt";
 const UPBIT_NOTICE_URLS = [
+  "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=20&category=all",
   "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=30&category=all",
+  "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=20",
   "https://api-manager.upbit.com/api/v1/notices?page=1&per_page=30",
 ];
 const GIWA_WORDS = /giwa|기와/i;
@@ -305,9 +307,17 @@ const WATCHERS = [
   {
     id: "crtsh", name: "SSL sertifika logları (crt.sh)", everySec: 900,
     async run() {
-      const r = await http("https://crt.sh/?q=%25.giwa.io&output=json", { headers: { "User-Agent": "giwa-mainnet-watch" } }, 60000);
-      if (!r.ok) throw new Error(`crt.sh HTTP ${r.status}`);
-      const rows = await r.json();
+      // crt.sh sık sık 502/503 veriyor; birkaç kez artan beklemeyle dene
+      let rows = null, last = "";
+      for (let i = 0; i < 3 && !rows; i++) {
+        if (i) await sleep(15000 * i);
+        try {
+          const r = await http("https://crt.sh/?q=%25.giwa.io&output=json", { headers: { "User-Agent": "giwa-mainnet-watch" } }, 60000);
+          if (!r.ok) { last = `HTTP ${r.status}`; continue; }
+          rows = await r.json();
+        } catch (e) { last = e.message; }
+      }
+      if (!rows) throw new Error(`crt.sh ${last}`);
       const names = [...new Set(rows.flatMap((x) => String(x.name_value).split("\n")).map((s) => s.trim().toLowerCase()).filter((s) => s.endsWith("giwa.io")))].sort();
       for (const n of names) if (!n.startsWith("*")) addRpcCandidate(`https://${n}`);
       const added = diffSet("certNames", names);
@@ -342,15 +352,16 @@ const WATCHERS = [
         "Origin": "https://upbit.com",
         "Referer": "https://upbit.com/service_center/notice",
       };
-      let j = null, last = "";
+      let j = null; const tried = [];
       for (const url of UPBIT_NOTICE_URLS) {
+        const tag = new URL(url).pathname.split("/").pop() + "?" + new URL(url).searchParams.get("per_page");
         try {
           const r = await http(url, { headers });
-          if (!r.ok) { last = `HTTP ${r.status}`; continue; }
+          if (!r.ok) { tried.push(`${tag}=HTTP ${r.status}${r.headers.get("server") ? "/" + r.headers.get("server") : ""}`); continue; }
           j = await r.json(); break;
-        } catch (e) { last = e.message; }
+        } catch (e) { tried.push(`${tag}=${e.message}`); }
       }
-      if (!j) throw new Error(`Upbit duyuruları alınamadı (${last})`);
+      if (!j) throw new Error(`Upbit duyuruları alınamadı (${tried.join(", ")})`);
       const notices = [];
       (function walk(o) { if (Array.isArray(o)) o.forEach(walk); else if (o && typeof o === "object") { if (typeof o.title === "string") notices.push(o); else Object.values(o).forEach(walk); } })(j);
       if (!notices.length) throw new Error("Upbit duyuru listesi okunamadı (format değişmiş olabilir)");
@@ -486,8 +497,10 @@ function heartbeat() {
     const day = now.toISOString().slice(0, 10);
     if (now.getUTCHours() === 9 && state.lastBeat !== day) {
       state.lastBeat = day; saveState();
-      const broken = WATCHERS.filter((w) => state.health[w.id] && !state.health[w.id].ok).map((w) => w.name);
-      notify(`Günlük kontrol: bot çalışıyor. ${Object.keys(state.fired).length ? "" : "Mainnet izi yok."}${broken.length ? `\nHata veren izleyiciler: ${broken.join(", ")}` : ""}`);
+      // Tek seferlik kesintiler rapora girmesin: en az 3 kez üst üste düşenleri, nedeniyle birlikte göster
+      const broken = WATCHERS.filter((w) => state.health[w.id] && !state.health[w.id].ok && (state.errStreak?.[w.id] || 0) >= 3)
+        .map((w) => `${w.name} — ${esc(String(state.health[w.id].err || "").slice(0, 160))}`);
+      notify(`Günlük kontrol: bot çalışıyor. ${Object.keys(state.fired).length ? "" : "Mainnet izi yok."}${broken.length ? `\nHata veren izleyiciler:\n${broken.map((b) => "• " + b).join("\n")}` : ""}`);
     }
   }, 60e3);
 }
