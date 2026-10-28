@@ -37,6 +37,9 @@ const UPBIT_NOTICE_URLS = [
   "https://api-manager.upbit.com/api/v1/notices?page=1&per_page=30",
 ];
 const GIWA_WORDS = /giwa|기와/i;
+// GIWA'nın L1 operasyon kayıtları. Yapı: <ağ>/<tarih-iş>/artifacts/<adım>/<L1 chain ID>/<dosya>.json
+// Bugüne kadarki her şey sepolia/…/11155111/ altında. Ethereum ana ağı = L1 chain ID 1.
+const CHAINOPS = "giwa-io/chain-operations";
 // RPC sağlayıcıları ağı genelde herkesten önce alır. Bu adreslerin cevabı değişirse haber ver.
 const PROVIDER_PROBES = [
   "https://giwa-mainnet.g.alchemy.com/v2/probe",
@@ -120,8 +123,17 @@ async function tg(method, body) {
   return j.result;
 }
 const outbox = [];
-function notify(text, { critical = false } = {}) {
-  const msg = (critical ? "🚨🚨 <b>GIWA MAINNET SİNYALİ</b>\n\n" : "🔔 ") + text + (critical ? SAFETY : "");
+// Seviyeler: info (rutin), hint (doğrulanmamış ipucu), strong (resmi kaynakta mainnet izi), confirmed (zincir üstünde kanıtlandı)
+const HEAD = {
+  info: "🔔 ",
+  hint: "🔎 <b>İpucu — doğrulanmadı</b>\n\n",
+  strong: "🟠 <b>GÜÇLÜ SİNYAL — resmi kaynakta mainnet izi</b>\n\n",
+  confirmed: "🚨🚨 <b>GIWA MAINNET — ZİNCİR ÜSTÜNDE DOĞRULANDI</b>\n\n",
+};
+function notify(text, { level = "info" } = {}) {
+  let msg = (HEAD[level] || HEAD.info) + text;
+  if (level === "strong" || level === "confirmed") msg += "\n\n" + assessText() + SAFETY;
+  else if (level === "hint") msg += "\n\n<i>Tek başına mainnet anlamına gelmez. Kesin durum için /dogrula</i>";
   console.log("[notify]", msg.replace(/<[^>]+>/g, ""));
   outbox.push(msg);
   flush();
@@ -154,7 +166,7 @@ async function pollTelegram() {
         const cmd = m.text.trim().split(/\s+/)[0].split("@")[0].toLowerCase();
         if (!state.chatId && cmd === "/start") {
           state.chatId = chat; saveState();
-          await tg("sendMessage", { chat_id: chat, text: "✅ Kayıt tamam. GIWA mainnet sinyallerini bu sohbete göndereceğim.\n\n/status — izleyicilerin durumu\n/test — deneme bildirimi" });
+          await tg("sendMessage", { chat_id: chat, text: "✅ Kayıt tamam. GIWA mainnet sinyallerini bu sohbete göndereceğim.\n\n/dogrula — kesin kaynakları şimdi kontrol et\n/status — izleyicilerin durumu\n/test — deneme bildirimi" });
           flush();
           continue;
         }
@@ -162,6 +174,7 @@ async function pollTelegram() {
         if (cmd === "/start") await tg("sendMessage", { chat_id: chat, text: "Zaten kayıtlısın. /status yaz." });
         else if (cmd === "/status") await tg("sendMessage", { chat_id: chat, text: statusText(), parse_mode: "HTML" });
         else if (cmd === "/test") notify("Test bildirimi — bot çalışıyor.");
+        else if (cmd === "/dogrula" || cmd === "/doğrula" || cmd === "/verify") verifyNow(chat);
       }
     } catch (e) {
       console.error("getUpdates hatası:", e.message);
@@ -176,16 +189,93 @@ function statusText() {
     const when = h ? new Date(h.at).toISOString().slice(11, 16) + " UTC" : "henüz yok";
     lines.push(`${h?.ok ? "🟢" : h ? "🔴" : "⚪"} ${w.name} — ${when}${h && !h.ok ? `\n   <i>${esc(h.err).slice(0, 120)}</i>` : ""}`);
   }
-  const fired = Object.keys(state.fired);
-  lines.push(fired.length ? `\nTetiklenen kritik sinyaller: ${fired.length}` : "\nKritik sinyal yok — mainnet izleri görünmedi.");
+  lines.push("", `<b>Karar:</b> ${assess().verdict}`, "Ayrıntı için /dogrula");
   return lines.join("\n");
 }
 
-// Kritik alarm: koşul doğru olduğu sürece bir kez gönderilir
-function fireOnce(key, text) {
+// /dogrula: kesin kaynakları sırayla yeniden çalıştırır ve kararı yazar
+let verifying = false;
+async function verifyNow(chat) {
+  if (verifying) return tg("sendMessage", { chat_id: chat, text: "Doğrulama zaten sürüyor, birazdan sonuç gelecek." });
+  verifying = true;
+  try {
+    await tg("sendMessage", { chat_id: chat, text: "🔍 Resmi kaynaklar ve Ethereum ana ağı kontrol ediliyor (~30 sn)…" });
+    for (const id of ["chainops", "node-repo", "docs", "docs-index", "registry", "l1", "rpc"]) {
+      const w = WATCHERS.find((x) => x.id === id);
+      if (w) await runWatcher(w, { force: true });
+    }
+    await tg("sendMessage", { chat_id: chat, text: assessText(), parse_mode: "HTML", disable_web_page_preview: true });
+  } catch (e) {
+    await tg("sendMessage", { chat_id: chat, text: `Doğrulama hatası: ${e.message}` }).catch(() => {});
+  } finally { verifying = false; }
+}
+
+// ---------- kesinlik değerlendirmesi ----------
+// state.ev: doğrulanmış kanıtlar. Sadece resmi kaynaklardan ve Ethereum ana ağından gelen bilgiler buraya yazılır.
+function ev() { return (state.ev ??= {}); }
+function setOfficial(source, data) {
+  const e = ev();
+  const o = (e.official ??= { sources: [] });
+  if (data.l2ChainId && o.l2ChainId && o.l2ChainId !== data.l2ChainId && !state.fired[`conflict:${data.l2ChainId}`]) {
+    state.fired[`conflict:${data.l2ChainId}`] = Date.now();
+    notify(`⚠️ Resmi kaynaklarda farklı mainnet chain ID'leri var: ${o.l2ChainId} (${esc(o.sources.join(", "))}) ve ${data.l2ChainId} (${esc(source)}). İkisine de güvenme, bekle.`, { level: "hint" });
+  }
+  for (const [k, v] of Object.entries(data)) if (v) o[k] = typeof v === "string" ? v.toLowerCase() : v;
+  if (!o.sources.includes(source)) o.sources.push(source);
+  // eski alanlarla uyum
+  if (o.l2ChainId) state.seen.mainnetChainId = o.l2ChainId;
+  if (o.portal) state.seen.mainnetPortal = o.portal;
+}
+function assess() {
+  const e = ev(); const o = e.official || {};
+  const lines = [];
+  const row = (good, text) => lines.push(`${good === true ? "✅" : good === false ? "❌" : "➖"} ${text}`);
+  row(!!o.l2ChainId, o.l2ChainId ? `Resmi mainnet config: chain ID <b>${o.l2ChainId}</b> (${esc(o.sources.join(", "))})` : "GitHub'da resmi mainnet config yok");
+  const code = e.l1Code || {};
+  const codeKeys = Object.keys(code);
+  if (!o.portal && !o.systemConfig) row(null, "Ethereum'daki kontratlar: kontrol için önce resmi adres gerekli");
+  else if (!codeKeys.length) row(null, "Köprü kontratları Ethereum ana ağında: kontrol sırada");
+  else row(codeKeys.every((k) => code[k]), `Köprü kontratları Ethereum ana ağında: ${codeKeys.map((k) => `${k} ${code[k] ? "var" : "yok"}`).join(", ")}`);
+  const txs = e.l1Txs || [];
+  if (txs.length && e.l1TxOk === undefined) row(null, `Resmi operasyon işlemleri (${txs.length}): Ethereum'da kontrol sırada`);
+  else if (txs.length) row(e.l1TxOk > 0, `Resmi operasyon işlemleri Ethereum'da onaylı: ${e.l1TxOk || 0}/${txs.length}`);
+  else row(null, "Resmi operasyon işlemi (Ethereum ana ağı) yayınlanmadı");
+  const r = e.rpc;
+  row(!!r?.full, r?.full ? `Mainnet RPC canlı ve Ethereum'a bağlı: <code>${esc(r.url)}</code> (chain ID ${r.id})` : "Ethereum ana ağına bağlı canlı GIWA RPC bulunamadı");
+  row(!!e.docsLive, e.docsLive ? `Resmi dokümanda mainnet bilgisi var${e.docsChainIds?.length ? ` (chain ID ${e.docsChainIds.join(", ")})` : ""}` : "Doküman hâlâ \"mainnet geliştiriliyor\" diyor");
+  row(!!e.registry, e.registry ? "Optimism superchain-registry'de mainnet config var" : "superchain-registry'de mainnet config yok");
+  const upOk = state.health.upbit?.ok;
+  row(e.upbitMainnet ? true : upOk === false ? null : false, e.upbitMainnet ? `Upbit resmi duyurusu: ${esc(e.upbitMainnet)}` : upOk === false ? "Upbit duyuruları bu sunucudan okunamıyor" : "Upbit'te mainnet duyurusu yok");
+
+  // Çapraz doğrulama: RPC'nin chain ID'si başka bağımsız resmi kaynakla eşleşmeli
+  const crossIds = new Set([o.l2ChainId, ...(e.docsChainIds || [])].filter(Boolean));
+  const cross = r?.full && (crossIds.has(r.id) || !!e.upbitMainnet);
+  let level, verdict;
+  if (cross) { level = "live"; verdict = "🟢 KESİN — GIWA mainnet canlı ve resmi kaynaklarla çapraz doğrulandı"; }
+  else if (r?.full) { level = "running"; verdict = "🟠 Resmi alan adında Ethereum'a bağlı bir zincir çalışıyor, ama chain ID henüz başka resmi kaynakla eşleşmedi"; }
+  else if ((codeKeys.length && codeKeys.every((k) => code[k])) || (e.l1TxOk || 0) > 0) { level = "deployed"; verdict = "🟠 Mainnet kontratları Ethereum'da deploy edilmiş — ağ henüz herkese açık değil"; }
+  else if (o.l2ChainId || e.registry || e.docsLive) { level = "prep"; verdict = "🟡 Resmi mainnet hazırlık izi var, zincir henüz canlı değil"; }
+  else { level = "none"; verdict = "⚪ Mainnet'e dair doğrulanmış iz yok"; }
+  return { level, verdict, lines };
+}
+function assessText() {
+  const a = assess();
+  return `<b>Kesinlik:</b> ${a.verdict}\n${a.lines.join("\n")}`;
+}
+// Karar seviyesi yükseldiğinde bir kez haber ver
+function reassess() {
+  const a = assess();
+  const r = ev().rpc;
+  if (a.level === "live") fireOnce("verdict:live", `Bağımsız resmi kaynaklar ve Ethereum ana ağı aynı şeyi söylüyor.\n\nRPC: <code>${esc(r.url)}</code> — Chain ID <b>${r.id}</b>\n<b>Zincir testi:</b>\n${(r.lines || []).join("\n")}`, "confirmed");
+  else if (a.level === "running") fireOnce(`verdict:running:${ev().rpc?.url}`, "Resmi giwa.io adresinde, Ethereum ana ağına bağlı ve blok üreten bir zincir bulundu.", "strong");
+  else if (a.level === "deployed") fireOnce("verdict:deployed", "GIWA mainnet kontratları Ethereum ana ağında zincir üstünde doğrulandı.", "strong");
+}
+
+// Alarm: aynı anahtar için bir kez gönderilir
+function fireOnce(key, text, level = "strong") {
   if (state.fired[key]) return;
   state.fired[key] = Date.now();
-  notify(text, { critical: true });
+  notify(text, { level });
 }
 // Farka dayalı izleme: ilk çalıştırmada sessizce taban değeri alır
 function diffSet(key, current) {
@@ -200,15 +290,19 @@ function diffSet(key, current) {
 const WATCHERS = [
   {
     id: "rpc", name: "Mainnet RPC adresleri", everySec: 60,
-    async run() {
+    async run({ force } = {}) {
       const extra = (state.seen.extraRpc || []).filter((u) => !RPC_CANDIDATES.includes(u));
       for (const url of [...RPC_CANDIDATES, ...extra]) {
         let id;
         try { id = parseInt(await rpc(url, "eth_chainId"), 16); } catch { continue; }
         if (!Number.isFinite(id) || id === SEPOLIA_CHAIN_ID) continue;
-        if (state.fired[`rpc:${url}:${id}`]) continue;
+        const key = `rpc:${url}:${id}`;
+        if (state.fired[key] && !force && ev().rpc?.url === url) continue;
         const v = await verifyRpc(url, id);
-        fireOnce(`rpc:${url}:${id}`, `GIWA MAINNET RPC CANLI — resmi alan adında cevap veriyor:\n<code>${url}</code>\nChain ID: <b>${id}</b>\n\n<b>Doğrulama (${v.score}/${v.total}):</b>\n${v.lines.join("\n")}`);
+        if (v.full) ev().rpc = { url, id, full: true, at: Date.now(), lines: v.lines };
+        else if (ev().rpc?.url === url) delete ev().rpc; // artık geçmiyorsa kanıtı geri al
+        if (assess().level === "live") { state.fired[key] ??= Date.now(); continue; } // ayrıntılar doğrulama mesajında gidecek
+        fireOnce(key, `Resmi giwa.io adresinde Sepolia OLMAYAN bir RPC cevap veriyor:\n<code>${url}</code>\nChain ID: <b>${id}</b>\n\n<b>Zincir testi (${v.score}/${v.total}):</b>\n${v.lines.join("\n")}`, v.full ? "strong" : "hint");
       }
     },
   },
@@ -224,7 +318,7 @@ const WATCHERS = [
       const firstRun = !state.seen.dnsLive;
       const added = diffSet("dnsLive", live);
       if (firstRun) return; // bot başlarken zaten var olanlar sinyal değil
-      for (const host of added) fireOnce(`dns:${host}`, `Yeni alt alan adı çözülmeye başladı: <code>${host}</code>\n\nBu genelde servisin hazırlandığını gösterir; henüz canlı olmayabilir.`);
+      for (const host of added) fireOnce(`dns:${host}`, `Yeni alt alan adı çözülmeye başladı: <code>${host}</code>\n\nBu genelde servisin hazırlandığını gösterir; henüz canlı olmayabilir. RPC izleyicisi bu adresi zincir testinden geçirecek.`, "hint");
     },
   },
   {
@@ -234,10 +328,12 @@ const WATCHERS = [
       if (!r.ok) throw new Error(`docs HTTP ${r.status}`);
       const text = await r.text();
       if (text.length < 200) throw new Error("docs içeriği beklenenden kısa");
-      if (!text.includes(DOCS_DEV_TEXT)) fireOnce("docs:dev-text-gone", `docs.giwa.io sayfasında "Mainnet geliştiriliyor" yazısı KALDIRILDI.\n${DOCS_URL.replace(".md", "")}`);
-      const ids = [...text.matchAll(/Chain ID[^0-9]{0,80}?(\d{3,12})/gi)].map((m) => Number(m[1])).filter((n) => n !== SEPOLIA_CHAIN_ID);
+      const ids = [...new Set([...text.matchAll(/Chain ID[^0-9]{0,80}?(\d{3,12})/gi)].map((m) => Number(m[1])).filter((n) => n !== SEPOLIA_CHAIN_ID && n !== 11155111))];
+      ev().docsChainIds = ids;
+      ev().docsLive = !text.includes(DOCS_DEV_TEXT);
+      if (ev().docsLive) fireOnce("docs:dev-text-gone", `docs.giwa.io sayfasında "Mainnet geliştiriliyor" yazısı KALDIRILDI.\n${DOCS_URL.replace(".md", "")}`);
       for (const m of text.matchAll(/https:\/\/[a-z0-9.-]+\.giwa\.io/gi)) addRpcCandidate(m[0]);
-      for (const id of new Set(ids)) fireOnce(`docs:chainid:${id}`, `Resmi dokümanda yeni Chain ID göründü: <b>${id}</b>\n${DOCS_URL.replace(".md", "")}`);
+      for (const id of ids) fireOnce(`docs:chainid:${id}`, `Resmi dokümanda yeni Chain ID göründü: <b>${id}</b>\n${DOCS_URL.replace(".md", "")}`);
     },
   },
   {
@@ -267,6 +363,43 @@ const WATCHERS = [
     },
   },
   {
+    id: "chainops", name: "GitHub giwa-io/chain-operations (L1 işlemleri)", everySec: 180,
+    async run() {
+      const commits = await gh(`repos/${CHAINOPS}/commits?per_page=10`);
+      if (!commits?.length) throw new Error("commit listesi boş");
+      const head = commits[0].sha;
+      const prevHead = state.seen.chainopsHead;
+      if (prevHead === head && state.seen.chainopsFiles) return;
+      const tree = await gh(`repos/${CHAINOPS}/git/trees/${head}?recursive=1`);
+      const files = (tree?.tree || []).filter((f) => f.type === "blob").map((f) => f.path);
+      if (!files.length) throw new Error("dosya ağacı boş");
+      state.seen.chainopsHead = head;
+      const added = diffSet("chainopsFiles", files);
+
+      const mainnet = files.filter(isMainnetOpsPath);
+      if (mainnet.length) await readMainnetOps(head, mainnet);
+
+      if (prevHead && prevHead !== head) {
+        const fresh = [];
+        for (const c of commits) { if (c.sha === prevHead) break; fresh.push(c); }
+        // Her yeni commit'in gerçekten değiştirdiği dosyalar (ekleme, silme, düzenleme)
+        const changed = new Set(added);
+        for (const c of fresh.slice(0, 6)) {
+          const d = await gh(`repos/${CHAINOPS}/commits/${c.sha}`).catch(() => null);
+          for (const f of d?.files || []) changed.add(f.filename);
+        }
+        const list = [...changed];
+        const nets = [...new Set(list.map(opsNetwork).filter(Boolean))];
+        const msgs = fresh.slice(0, 6).map((c) => `• ${esc(c.commit.message.split("\n")[0])}`).join("\n");
+        if (list.some(isMainnetOpsPath)) {
+          if (!mainnet.length) notify(`${CHAINOPS}: ana ağ (L1 ID 1) dosyalarında değişiklik oldu:\n${msgs}\nhttps://github.com/${CHAINOPS}/commits`, { level: "hint" });
+        } else {
+          notify(`${CHAINOPS} güncellendi — <b>mainnet değil</b>${nets.length ? `, ağ: ${esc(nets.join(", "))}` : ""}:\n${msgs}\nhttps://github.com/${CHAINOPS}/commits`);
+        }
+      }
+    },
+  },
+  {
     id: "org-repos", name: "GitHub giwa-io yeni depolar", everySec: 600,
     async run() {
       const repos = await gh("orgs/giwa-io/repos?per_page=100&sort=created");
@@ -275,11 +408,13 @@ const WATCHERS = [
       const prevPushed = state.seen.orgPushed;
       state.seen.orgPushed = pushed;
       if (prevPushed) for (const [name, at] of Object.entries(pushed)) {
-        if (!prevPushed[name] || prevPushed[name] === at || name === "giwa-io/node") continue;
+        // node ve chain-operations kendi izleyicilerinde dosya düzeyinde inceleniyor
+        if (!prevPushed[name] || prevPushed[name] === at || name === "giwa-io/node" || name === CHAINOPS) continue;
         const commits = (await gh(`repos/${name}/commits?per_page=10&since=${encodeURIComponent(prevPushed[name])}`)) || [];
         const msgs = commits.map((c) => c.commit.message.split("\n")[0]);
-        const hot = msgs.filter((m) => /mainnet|chain ?id|launch|genesis|deploy/i.test(m));
-        if (hot.length) fireOnce(`push:${name}:${at}`, `${esc(name)} deposuna mainnet ile ilgili commit:\n${hot.map((m) => `• ${esc(m)}`).join("\n")}\nhttps://github.com/${name}/commits`);
+        // Sadece mesajında açıkça mainnet geçenler; "deploy" gibi genel kelimeler ve testnet işleri ipucu sayılmaz
+        const hot = msgs.filter((m) => /mainnet|메인넷/i.test(m) && !/sepolia|testnet|devnet/i.test(m));
+        if (hot.length) fireOnce(`push:${name}:${at}`, `${esc(name)} deposunda mesajında "mainnet" geçen commit:\n${hot.map((m) => `• ${esc(m)}`).join("\n")}\nhttps://github.com/${name}/commits`, "hint");
         else if (msgs.length) notify(`${esc(name)} güncellendi:\n${msgs.slice(0, 5).map((m) => `• ${esc(m)}`).join("\n")}`);
       }
       const added = diffSet("orgRepos", repos.map((r) => r.full_name));
@@ -301,6 +436,7 @@ const WATCHERS = [
         notify(`Zincir kayıt deposunda GIWA geçen yeni ${i?.pull_request ? "PR" : "issue"}:\n<b>${esc(i?.title)}</b>\n${url}`);
       }
       const file = await gh("repos/ethereum-optimism/superchain-registry/contents/superchain/configs/mainnet/giwa.toml");
+      ev().registry = !!file;
       if (file) fireOnce("registry:mainnet-toml", `Optimism superchain-registry'ye GIWA MAINNET config'i eklendi:\n${file.html_url}`);
     },
   },
@@ -324,7 +460,7 @@ const WATCHERS = [
       if (added.length) {
         const hot = added.filter((n) => /mainnet|rpc|sequencer|explorer|bridge/.test(n) && !/sepolia|testnet/.test(n));
         notify(`giwa.io için yeni SSL sertifikası alınan alan adları:\n${added.slice(0, 20).map((n) => `• <code>${esc(n)}</code>`).join("\n")}`);
-        for (const n of hot) fireOnce(`crt:${n}`, `Mainnet'e işaret eden yeni sertifika: <code>${esc(n)}</code>\nDNS ve RPC izleyicileri bu adresi zaten deneyecek.`);
+        for (const n of hot) fireOnce(`crt:${n}`, `Mainnet'e işaret edebilecek yeni sertifika: <code>${esc(n)}</code>\nRPC izleyicisi bu adresi zincir testinden geçirecek.`, "hint");
       }
     },
   },
@@ -334,11 +470,27 @@ const WATCHERS = [
       const nonce = parseInt(await rpc(ETH_RPC, "eth_getTransactionCount", [SEPOLIA_BATCHER, "latest"]), 16);
       const prev = state.seen.batcherNonce;
       state.seen.batcherNonce = nonce;
-      if (prev !== undefined && nonce > prev) fireOnce(`l1:batcher:${nonce > 0}`, `GIWA Sepolia batcher adresi Ethereum ANA AĞINDA işlem yapmaya başladı:\n<code>${SEPOLIA_BATCHER}</code>\nnonce ${prev} → ${nonce}\nhttps://etherscan.io/address/${SEPOLIA_BATCHER}`);
-      const portal = state.seen.mainnetPortal;
-      if (portal) {
-        const code = await rpc(ETH_RPC, "eth_getCode", [portal, "latest"]);
-        if (code && code !== "0x") fireOnce(`l1:portal:${portal}`, `Resmi config'teki GIWA köprü (OptimismPortal) kontratı Ethereum ana ağında DEPLOY EDİLMİŞ:\nhttps://etherscan.io/address/${portal}`);
+      if (prev !== undefined && nonce > prev) fireOnce(`l1:batcher:${nonce > 0}`, `GIWA Sepolia batcher adresi Ethereum ANA AĞINDA işlem yaptı:\n<code>${SEPOLIA_BATCHER}</code>\nnonce ${prev} → ${nonce}\nhttps://etherscan.io/address/${SEPOLIA_BATCHER}`, "hint");
+
+      // Resmi config'ten gelen kontrat adresleri Ethereum ana ağında gerçekten var mı
+      const o = ev().official || {};
+      const targets = { OptimismPortal: o.portal, SystemConfig: o.systemConfig };
+      const code = (ev().l1Code ??= {});
+      for (const [name, addr] of Object.entries(targets)) {
+        if (!addr) continue;
+        const c = await rpc(ETH_RPC, "eth_getCode", [addr, "latest"]);
+        code[name] = !!c && c !== "0x";
+      }
+
+      // chain-operations'taki ana ağ (L1 chain ID 1) işlem hash'leri Ethereum'da onaylı mı
+      const txs = ev().l1Txs || [];
+      if (txs.length) {
+        let okCount = 0;
+        for (const h of txs) {
+          const rc = await rpc(ETH_RPC, "eth_getTransactionReceipt", [h]).catch(() => null);
+          if (rc?.status === "0x1") okCount++;
+        }
+        ev().l1TxOk = okCount;
       }
     },
   },
@@ -370,7 +522,9 @@ const WATCHERS = [
       for (const key of added) {
         const n = giwa.find((x) => String(x.id ?? x.title) === key);
         const link = n.id ? `https://upbit.com/service_center/notice?id=${n.id}` : "https://upbit.com/service_center/notice";
-        fireOnce(`upbit:${key}`, `Upbit'te GIWA geçen YENİ resmi duyuru:\n<b>${esc(n.title)}</b>\n${link}`);
+        const isLaunch = /메인넷|mainnet|출시|오픈|런칭|launch/i.test(n.title);
+        if (isLaunch) ev().upbitMainnet = n.title;
+        fireOnce(`upbit:${key}`, `Upbit'te GIWA geçen YENİ resmi duyuru:\n<b>${esc(n.title)}</b>\n${link}`, isLaunch ? "strong" : "hint");
       }
     },
   },
@@ -444,7 +598,8 @@ async function verifyRpc(url, id) {
   const known = state.seen.mainnetChainId;
   if (known) ok(known === id, "Chain ID GitHub'daki resmi config ile eşleşiyor", `Chain ID resmi config'teki ${known} ile EŞLEŞMİYOR`);
   else lines.push("➖ GitHub'da henüz resmi config yok, chain ID çapraz kontrolü bekliyor");
-  return { score, total: known ? total : total - 1, lines };
+  const full = /\.giwa\.io$/i.test(new URL(url).hostname) && isOp && anchored && moving;
+  return { score, total: known ? total : total - 1, lines, full };
 }
 
 // Keşfedilen giwa.io adreslerini RPC izleyicisine ekler (testnet ve web sayfaları hariç)
@@ -456,13 +611,61 @@ function addRpcCandidate(url) {
   if (!state.seen.extraRpc.includes(u) && !RPC_CANDIDATES.includes(u)) state.seen.extraRpc.push(u);
 }
 
+// chain-operations dosya yolundan ağ bilgisini çıkarır
+function opsL1Id(p) {
+  const seg = p.split("/").find((s) => /^\d+$/.test(s));
+  return seg ? Number(seg) : null;
+}
+function opsNetwork(p) {
+  const id = opsL1Id(p);
+  if (id === 1) return "Ethereum ana ağı (L1 ID 1)";
+  if (id === 11155111) return "Sepolia testnet (L1 ID 11155111)";
+  if (id) return `L1 ID ${id}`;
+  return null;
+}
+function isMainnetOpsPath(p) {
+  const top = p.split("/")[0];
+  if (!p.includes("/") || /^(\.github|resources)$/.test(top)) return false;
+  const id = opsL1Id(p);
+  if (id === 1) return true;           // Ethereum ana ağında yürütülen iş — en kesin işaret
+  if (id) return false;                 // başka bir L1 (Sepolia vb.)
+  return /mainnet/i.test(top);          // L1 klasörü olmayan mainnet/ altındaki dosyalar (README vb.)
+}
+// Ana ağ operasyon dosyalarından resmi adresleri, chain ID'yi ve işlem hash'lerini okur
+async function readMainnetOps(sha, files) {
+  state.seen.chainopsRead ??= {};
+  const ops = [...new Set(files.map((f) => f.split("/").slice(0, 2).join("/")))];
+  const txs = new Set(ev().l1Txs || []);
+  for (const f of files.filter((x) => x.endsWith(".json"))) {
+    if (state.seen.chainopsRead[f]) continue;
+    let j;
+    try {
+      const r = await http(`https://raw.githubusercontent.com/${CHAINOPS}/${sha}/${encodeURI(f)}`);
+      if (!r.ok) continue;
+      j = await r.json();
+    } catch { continue; }
+    state.seen.chainopsRead[f] = true;
+    if (/deploy-config\.json$/.test(f) && j.l1ChainID === 1 && j.l2ChainID) setOfficial(`chain-operations ${f.split("/")[1]}`, { l2ChainId: Number(j.l2ChainID) });
+    if (/l1-contracts\.json$/.test(f) && j.opChainDeployment) {
+      setOfficial(`chain-operations ${f.split("/")[1]}`, {
+        portal: j.opChainDeployment.optimismPortalProxyAddress,
+        systemConfig: j.opChainDeployment.systemConfigProxyAddress,
+      });
+    }
+    for (const t of j.transactions || []) if (/^0x[0-9a-f]{64}$/i.test(t.hash || "") && txs.size < 30) txs.add(t.hash.toLowerCase());
+  }
+  ev().l1Txs = [...txs];
+  // Dosyalar okunduktan sonra haber ver ki mesajdaki kesinlik tablosu dolu olsun.
+  // Ethereum'daki kontrat/işlem kontrolü L1 izleyicisinde yapılır; sonuç ayrıca bildirilir.
+  for (const op of ops) fireOnce(`chainops:op:${op}`, `GIWA, ${CHAINOPS} deposuna <b>Ethereum ana ağı</b> için operasyon kaydı ekledi:\n<code>${esc(op)}</code>\nhttps://github.com/${CHAINOPS}/tree/${sha}/${encodeURI(op)}\n\nKontratlar ve işlemler birkaç dakika içinde Ethereum'da kontrol edilecek.`);
+}
+
 async function describeRollup(sha, file) {
   try {
     const r = await http(`https://raw.githubusercontent.com/giwa-io/node/${sha}/${file}`);
     const j = await r.json();
     if (j.l1_chain_id !== 1) return `\nL1 chain ID: ${j.l1_chain_id} (Ethereum ana ağı değil)`;
-    state.seen.mainnetChainId = j.l2_chain_id;
-    state.seen.mainnetPortal = j.deposit_contract_address;
+    setOfficial(`giwa-io/node ${file}`, { l2ChainId: j.l2_chain_id, portal: j.deposit_contract_address, systemConfig: j.l1_system_config_address });
     return `\n\n<b>Resmi mainnet Chain ID: ${j.l2_chain_id}</b>\nKöprü (OptimismPortal): <code>${j.deposit_contract_address}</code>\nBatch inbox: <code>${j.batch_inbox_address}</code>\nGenesis L1 blok: ${j.genesis?.l1?.number}`;
   } catch (e) {
     return `\n(rollup dosyası okunamadı: ${esc(e.message)})`;
@@ -471,10 +674,11 @@ async function describeRollup(sha, file) {
 
 // ---------- zamanlayıcı ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function runWatcher(w) {
+async function runWatcher(w, opts = {}) {
   state.errStreak ??= {};
   try {
-    await w.run();
+    await w.run(opts);
+    reassess();
     if (state.errStreak[w.id] >= 10) notify(`✅ "${w.name}" izleyicisi tekrar çalışıyor.`);
     state.health[w.id] = { ok: true, at: Date.now() };
     state.errStreak[w.id] = 0;
@@ -500,7 +704,7 @@ function heartbeat() {
       // Tek seferlik kesintiler rapora girmesin: en az 3 kez üst üste düşenleri, nedeniyle birlikte göster
       const broken = WATCHERS.filter((w) => state.health[w.id] && !state.health[w.id].ok && (state.errStreak?.[w.id] || 0) >= 3)
         .map((w) => `${w.name} — ${esc(String(state.health[w.id].err || "").slice(0, 160))}`);
-      notify(`Günlük kontrol: bot çalışıyor. ${Object.keys(state.fired).length ? "" : "Mainnet izi yok."}${broken.length ? `\nHata veren izleyiciler:\n${broken.map((b) => "• " + b).join("\n")}` : ""}`);
+      notify(`Günlük kontrol: bot çalışıyor.\n${assess().verdict}${broken.length ? `\nHata veren izleyiciler:\n${broken.map((b) => "• " + b).join("\n")}` : ""}`);
     }
   }, 60e3);
 }

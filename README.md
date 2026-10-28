@@ -10,13 +10,33 @@ GIWA mainnet'inin açıldığını gösteren sinyalleri izler ve Telegram'a bild
 | Upbit duyuruları | 2 dk | Upbit'te başlığında GIWA/기와 geçen yeni resmi duyuru |
 | giwa.io DNS | 2 dk | `rpc`, `mainnet-rpc`, `explorer`, `bridge` gibi yeni alt alan adları |
 | Resmi doküman | 2 dk | "Mainnet geliştiriliyor" yazısının kalkması, yeni chain ID |
+| GitHub `giwa-io/chain-operations` | 3 dk | Dosya yolundan ağı ayırt eder; Ethereum ana ağı (L1 ID 1) operasyonu gelirse resmi chain ID, kontrat adresleri ve işlem hash'lerini okur |
 | GitHub `giwa-io/node` | 3 dk | Her yeni commit; `.env.mainnet`, `mainnet-rollup.json` gibi mainnet dosyaları (gelirse resmi chain ID ve köprü adresi mesaja yazılır) |
-| Ethereum L1 | 5 dk | Sepolia batcher adresinin ana ağda işlem yapması; resmi köprü kontratının ana ağa deploy edilmesi |
+| Ethereum L1 | 5 dk | Resmi config'teki OptimismPortal/SystemConfig kontratlarının ana ağda kodu; resmi operasyon işlemlerinin ana ağda onayı; Sepolia batcher adresinin ana ağda işlem yapması (ipucu) |
 | Doküman sayfa listesi | 5 dk | docs.giwa.io'ya eklenen yeni sayfalar, özellikle mainnet sayfaları |
-| GitHub `giwa-io` | 10 dk | Yeni public depo; herhangi bir depoda mainnet/launch/deploy geçen commit |
+| GitHub `giwa-io` | 10 dk | Yeni public depo; diğer depolarda mesajında açıkça "mainnet" geçen commit (ipucu) |
 | superchain-registry + chainlist | 10 dk | GIWA geçen yeni PR/issue; superchain-registry'ye mainnet config'i |
 | RPC sağlayıcıları | 10 dk | Alchemy'nin `giwa-mainnet` adresinin cevabının değişmesi (sağlayıcılar ağı genelde herkesten önce alır) |
 | SSL sertifikaları (crt.sh) | 15 dk | giwa.io için yeni sertifika alınan alan adları; bunlar RPC izleyicisine otomatik eklenir |
+
+## Alarm seviyeleri
+
+| Seviye | Ne zaman |
+|---|---|
+| 🔔 Bilgi | Rutin değişiklik (ör. Sepolia testnet operasyonu) — mainnet olmadığı açıkça yazılır |
+| 🔎 İpucu — doğrulanmadı | DNS, SSL sertifikası, commit mesajında "mainnet", sağlayıcı cevabı değişti. Tek başına bir şey kanıtlamaz |
+| 🟠 Güçlü sinyal | Resmi kaynakta mainnet izi: GitHub'da L1 ID'si 1 olan config/operasyon, dokümanda mainnet, superchain-registry, Upbit duyurusu; ya da kontratların Ethereum'da bulunması |
+| 🚨 Zincir üstünde doğrulandı | Resmi giwa.io RPC'si Ethereum ana ağına bağlı, blok üretiyor ve chain ID'si bağımsız bir resmi kaynakla (GitHub config, doküman veya Upbit) eşleşiyor |
+
+Güçlü ve doğrulandı mesajlarının altında her zaman güncel **kesinlik tablosu** olur.
+
+### `giwa-io/chain-operations` nasıl okunuyor
+
+Depodaki dosya yolu ağı söyler: `<ağ>/<tarih-iş>/artifacts/<adım>/<L1 chain ID>/…json`. `11155111` Sepolia testnet, `1` Ethereum ana ağıdır. Bot commit mesajına değil dosya yoluna bakar. L1 ID'si 1 olan bir klasör gelirse:
+
+1. `deploy-config.json`'dan resmi mainnet chain ID'sini okur
+2. `l1-contracts.json`'dan OptimismPortal ve SystemConfig adreslerini okur ve Ethereum ana ağında kodlarının olup olmadığına bakar
+3. `execute.json` içindeki işlem hash'lerinin Ethereum'da onaylanıp onaylanmadığını kontrol eder
 
 ## Gizli launch'a karşı doğrulama
 
@@ -44,7 +64,8 @@ Ekip doküman ve GitHub'ı güncellemeden açsa bile Ethereum'daki deploy, RPC s
 
 ## Komutlar
 
-- `/status` — her izleyicinin son çalışma zamanı ve hata durumu
+- `/dogrula` — kesin kaynakları (GitHub config, Ethereum ana ağı, RPC, doküman) hemen yeniden kontrol eder ve kesinlik tablosunu gönderir
+- `/status` — her izleyicinin son çalışma zamanı, hata durumu ve güncel karar
 - `/test` — deneme bildirimi
 
 ## Güvenlik
