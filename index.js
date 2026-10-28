@@ -8,10 +8,12 @@
 //   ETH_RPC_URL         (isteğe bağlı) Ethereum ana ağı RPC. Boşsa ücretsiz publicnode kullanılır
 //   DATA_DIR            (isteğe bağlı) Durum dosyasının klasörü. Railway'de Volume'u /data'ya bağla.
 //   TZ_OFFSET_HOURS     (isteğe bağlı) Günlük "hayattayım" mesajı saati için, varsayılan 3 (İstanbul)
+//   STATUS_KEY          (isteğe bağlı) Verilirse GET /status?key=... ile durum JSON olarak okunur (kişisel asistan için)
 
 import fs from "node:fs";
 import path from "node:path";
 import dns from "node:dns/promises";
+import { createServer } from "node:http";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
@@ -135,6 +137,9 @@ function notify(text, { level = "info" } = {}) {
   if (level === "strong" || level === "confirmed") msg += "\n\n" + assessText() + SAFETY;
   else if (level === "hint") msg += "\n\n<i>Tek başına mainnet anlamına gelmez. Kesin durum için /dogrula</i>";
   console.log("[notify]", msg.replace(/<[^>]+>/g, ""));
+  // Son bildirimleri sakla (kişisel asistan /status üzerinden okur)
+  (state.recent ??= []).push({ at: Date.now(), level, text: text.replace(/<[^>]+>/g, "").slice(0, 500) });
+  state.recent = state.recent.slice(-20);
   outbox.push(msg);
   flush();
 }
@@ -709,6 +714,34 @@ function heartbeat() {
   }, 60e3);
 }
 
+// Kişisel asistan için salt okunur durum uç noktası: GET /status?key=STATUS_KEY
+function statusServer() {
+  const key = process.env.STATUS_KEY;
+  const port = Number(process.env.PORT);
+  if (!key || !port) return;
+  createServer((req, res) => {
+    const u = new URL(req.url, "http://x");
+    if (u.pathname !== "/status" || u.searchParams.get("key") !== key) {
+      res.writeHead(404).end();
+      return;
+    }
+    const a = assess();
+    const strip = (t) => String(t).replace(/<[^>]+>/g, "");
+    const health = Object.fromEntries(
+      WATCHERS.map((w) => [w.name, state.health[w.id] ? (state.health[w.id].ok ? "ok" : "hata") : "bekliyor"]),
+    );
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({
+      level: a.level,
+      verdict: strip(a.verdict),
+      checks: a.lines.map(strip),
+      recent: (state.recent || []).slice(-10),
+      health,
+      at: Date.now(),
+    }));
+  }).listen(port, () => console.log(`Durum uç noktası açık (port ${port})`));
+}
+
 async function main() {
   loadState(); saveState();
   const me = await tg("getMe", {});
@@ -716,6 +749,7 @@ async function main() {
   pollTelegram();
   for (const w of WATCHERS) if (!w.enabled || w.enabled()) loop(w); else console.log(`[${w.id}] kapalı (değişken yok)`);
   heartbeat();
+  statusServer();
   if (state.chatId) notify("Bot başladı, izleme açık. /status ile durumu görebilirsin.");
 }
 main().catch((e) => { console.error(e); process.exit(1); });
