@@ -25,6 +25,8 @@ const NPM_PKG = "@layerzerolabs/lz-definitions";
 const DOCS_CHAIN = "https://docs.layerzero.network/chain.md";
 const DOCS_INDEX = "https://docs.layerzero.network/llms.txt";
 const CRT_DOMAINS = ["layerzero.network", "layerzero-api.com"];
+// Testnet RPC'si metadata'da testnet.zero.layerzero.network olarak duruyor; mainnet büyük ihtimalle aynı alan adı altında olacak
+const GUESSED_RPCS = ["https://rpc.zero.layerzero.network", "https://mainnet.zero.layerzero.network", "https://zero.layerzero.network", "https://rpc.atlas.zero.layerzero.network", "https://interop.zero.layerzero.network"];
 const ZERO_WORDS = /zero(?!-?knowledge)|atlas|zone/i;
 const SAFETY = "\n\n⚠️ Resmi kaynaklar: layerzero.network, docs.layerzero.network, github.com/LayerZero-Labs, @LayerZero_Core. Bot işlem yapmaz; yeni bir ağa girersen sadece kaybetmeyi göze aldığın küçük bir miktarla gir.";
 
@@ -200,6 +202,7 @@ export function startLayerZero(ctx) {
           const ep = (v?.deployments || []).find((d) => d.endpointV2?.address)?.endpointV2?.address;
           const details = `${chainId ? `\nChain ID: ${chainId}` : ""}${rpcs.length ? `\nRPC: ${rpcs.map((u) => `<code>${esc(u)}</code>`).join(", ")}` : ""}${ep ? `\nEndpointV2: <code>${esc(ep)}</code>` : ""}`;
           if (/testnet|sandbox/i.test(key) || (eids.length && !mainnetEids.length)) {
+            if (chainId) S.testnetChainIds = [...new Set([...(S.testnetChainIds || []), Number(chainId)])];
             S.facts.metaTestnets.push(`${key} (EID ${eids.join(", ") || "?"}${chainId ? `, chain ID ${chainId}` : ""})`);
             fireOnce(`meta:test:${key}`, `LayerZero metadata'sına Zero test zinciri eklendi: <b>${esc(key)}</b> (EID ${eids.join(", ")}). Mainnet değil.`, "info");
             if (chainId || rpcs.length) fireOnce(`meta:test:${key}:${chainId}:${rpcs.join(",")}`, `Zero test zinciri ayrıntıları: <b>${esc(key)}</b>${details}\n\nBu testnet — gerçek para yok, mainnet sinyali değil.`, "info");
@@ -221,10 +224,15 @@ export function startLayerZero(ctx) {
     {
       id: "rpc", name: "Zero RPC denemesi", every: 60,
       async run() {
-        const list = S.seen.rpcCandidates || [];
+        const list = [...new Set([...(S.seen.rpcCandidates || []), ...GUESSED_RPCS])].filter((u) => !/testnet|sepolia/i.test(u));
         for (const url of list) {
           let id;
           try { id = parseInt(await rpc(url, "eth_chainId"), 16); } catch { continue; }
+          // Testnet'in (ve yerel geliştirme ağlarının) chain ID'si mainnet sayılmaz
+          if ([1337, 31337, ...(S.testnetChainIds || [])].includes(id)) {
+            fireOnce(`rpc:testnet:${url}:${id}`, `<code>${esc(url)}</code> cevap veriyor ama chain ID ${id} testnet'e ait — mainnet değil.`, "info");
+            continue;
+          }
           const b1 = parseInt(await rpc(url, "eth_blockNumber"), 16);
           await new Promise((r) => setTimeout(r, 5000));
           const b2 = parseInt(await rpc(url, "eth_blockNumber"), 16);
