@@ -50,6 +50,27 @@ Bir RPC bulunduğunda bot 5 kontrol yapar ve sonucu mesaja yazar:
 
 Ekip doküman ve GitHub'ı güncellemeden açsa bile Ethereum'daki deploy, RPC sağlayıcıları, SSL sertifikası ve DNS izlerini saklayamaz.
 
+## LayerZero "Zero" izleme (ek modül)
+
+`layerzero.js` aynı bot içinde ama GIWA'dan **bağımsız** çalışır: kendi durum dosyası (`/data/lz-state.json`), kendi hata yakalaması. Modül bozulsa ya da hata verse bile GIWA izleme etkilenmez. Kapatmak için Railway'de `LZ_WATCH=0`. Mesajları 🟣 ile başlar.
+
+| İzleyici | Sıklık | Neyi yakalar |
+|---|---|---|
+| ZRO kontratı (Ethereum, Arbitrum, Base) | 2 dk | `peers(33002)` doldu mu — ZRO'nun Zero'ya köprülenebildiği an. Her turda bilinen bir peer'ı okuyarak kendini test eder |
+| ZRO `PeerSet` olayları | 5 dk | ZRO'nun Ethereum'da bağlandığı her yeni zincir; 33xxx aralığı Zero sayılır |
+| npm `@layerzerolabs/lz-definitions` | 10 dk | Zero ile ilgili yeni endpoint ID'leri (şu an `ZEROINTEROP_V2_MAINNET = 33002`, EVM olarak tanımlı) |
+| LayerZero metadata API | 10 dk | Zero kaydı: chain ID, RPC adresleri, EndpointV2 |
+| Zero RPC denemesi | 1 dk | Bulunan RPC'ler: blok üretiyor mu, chain ID metadata ile eşleşiyor mu, ZRO peer adresinde kontrat var mı |
+| Resmi doküman | 5 dk | Zero sayfasındaki zaman çizelgesi değişti mi; yeni Zero/ATLAS sayfaları |
+| GitHub LayerZero-Labs | 10 dk | Adında zero/atlas/zone geçen yeni public depo |
+| SSL sertifikaları (crt.sh) | 20 dk | layerzero.network ve layerzero-api.com'da zero/rpc/explorer/bridge sertifikaları |
+
+Seviyeler: 🟣 bilgi · 🟣🔎 ipucu · 🟣🟠 güçlü sinyal · 🟣🚨 zincir üstünde doğrulandı (RPC canlı + chain ID metadata ile eşleşiyor + ZRO köprü kontratı Zero'da mevcut).
+
+Komutlar: `/lz` durum, `/lzdogrula` anlık kontrol. İsteğe bağlı değişkenler: `ARB_RPC_URL`, `BASE_RPC_URL`.
+
+Not: `zerointerop`'un Zero olduğu npm tanımından çıkarılan güçlü bir tahmin, resmi teyit değil. Bot ayrıca 33xxx aralığındaki ve adında zero/atlas/zone geçen her yeni endpoint'i de Zero adayı olarak izler.
+
 ## Railway'e kurulum
 
 1. GitHub'da yeni bir **private** repo aç (ör. `giwa-watch`), `index.js`, `package.json`, `README.md` dosyalarını yükle (Add file → Upload files).
@@ -67,6 +88,7 @@ Ekip doküman ve GitHub'ı güncellemeden açsa bile Ethereum'daki deploy, RPC s
 - `/dogrula` — kesin kaynakları (GitHub config, Ethereum ana ağı, RPC, doküman) hemen yeniden kontrol eder ve kesinlik tablosunu gönderir
 - `/status` — her izleyicinin son çalışma zamanı, hata durumu ve güncel karar
 - `/test` — deneme bildirimi
+- `/lz`, `/lzdogrula` — LayerZero/Zero izleme durumu ve anlık kontrol
 
 ## Güvenlik
 

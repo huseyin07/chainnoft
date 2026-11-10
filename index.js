@@ -156,6 +156,13 @@ async function flush() {
     console.error("Telegram gönderim hatası:", e.message);
   } finally { flushing = false; }
 }
+// LayerZero modülü için: GIWA'nın kesinlik tablosu eklenmeden, aynı kuyruktan ham mesaj gönderir
+function sendRaw(msg) {
+  console.log("[notify:lz]", msg.replace(/<[^>]+>/g, ""));
+  outbox.push(msg);
+  flush();
+}
+let lz = null; // LayerZero/Zero izleyicisi (layerzero.js) — başlamazsa null kalır, GIWA etkilenmez
 
 // Komutlar: /start /status /test
 let updateOffset = 0;
@@ -180,6 +187,7 @@ async function pollTelegram() {
         else if (cmd === "/status") await tg("sendMessage", { chat_id: chat, text: statusText(), parse_mode: "HTML" });
         else if (cmd === "/test") notify("Test bildirimi — bot çalışıyor.");
         else if (cmd === "/dogrula" || cmd === "/doğrula" || cmd === "/verify") verifyNow(chat);
+        else if (cmd === "/lz" || cmd === "/lzdogrula") lzCommand(chat, cmd);
       }
     } catch (e) {
       console.error("getUpdates hatası:", e.message);
@@ -742,6 +750,33 @@ function statusServer() {
   }).listen(port, () => console.log(`Durum uç noktası açık (port ${port})`));
 }
 
+// /lz ve /lzdogrula — LayerZero modülünün durumu. Modülde hata olursa sadece bu komut etkilenir.
+async function lzCommand(chat, cmd) {
+  try {
+    if (!lz) return await tg("sendMessage", { chat_id: chat, text: "LayerZero izleme kapalı (LZ_WATCH=0 ya da modül başlamadı — Railway loglarına bak)." });
+    if (cmd === "/lzdogrula") {
+      await tg("sendMessage", { chat_id: chat, text: "🔍 ZRO kontratları, metadata, RPC ve doküman kontrol ediliyor…" });
+      return await tg("sendMessage", { chat_id: chat, text: await lz.verify(), parse_mode: "HTML", disable_web_page_preview: true });
+    }
+    await tg("sendMessage", { chat_id: chat, text: lz.status(), parse_mode: "HTML", disable_web_page_preview: true });
+  } catch (e) {
+    console.error("[lz] komut hatası:", e.message);
+    await tg("sendMessage", { chat_id: chat, text: `LayerZero komutu hata verdi: ${e.message}` }).catch(() => {});
+  }
+}
+
+// LayerZero modülünü GIWA'dan bağımsız başlatır: dosya bozuk olsa ya da hata verse bile GIWA çalışmaya devam eder
+async function startLz() {
+  if (process.env.LZ_WATCH === "0") return console.log("[lz] kapalı (LZ_WATCH=0)");
+  try {
+    const m = await import("./layerzero.js");
+    lz = m.startLayerZero({ http, gh, send: sendRaw, esc, dataDir: DATA_DIR, ethRpc: ETH_RPC });
+  } catch (e) {
+    lz = null;
+    console.error("[lz] başlatılamadı, GIWA izleme etkilenmedi:", e);
+  }
+}
+
 async function main() {
   loadState(); saveState();
   const me = await tg("getMe", {});
@@ -751,5 +786,7 @@ async function main() {
   heartbeat();
   statusServer();
   if (state.chatId) notify("Bot başladı, izleme açık. /status ile durumu görebilirsin.");
+  await startLz();
+  if (lz && state.chatId) sendRaw("🟣 <b>LayerZero</b> · Zero izleme de açık. /lz durum, /lzdogrula anlık kontrol.");
 }
 main().catch((e) => { console.error(e); process.exit(1); });
