@@ -98,7 +98,10 @@ export function startLayerZero(ctx) {
     const peers = f.peers || {};
     const set = Object.entries(peers).filter(([, v]) => v);
     row(set.length ? true : false, set.length ? `ZRO köprüsü Zero'ya bağlandı: ${set.map(([k, v]) => `${k} → <code>${v}</code>`).join(", ")}` : "ZRO kontratında Zero peer'ı yok (henüz ZRO gönderilemez)");
-    row(f.metadata ? true : false, f.metadata ? `LayerZero metadata'da: <b>${esc(f.metadata.key)}</b>${f.metadata.chainId ? ` · chain ID ${f.metadata.chainId}` : ""}` : "LayerZero metadata API'sinde Zero kaydı yok");
+    if (f.metadata) row(true, `LayerZero metadata'da: <b>${esc(f.metadata.key)}</b>${f.metadata.chainId ? ` · chain ID ${f.metadata.chainId}` : ""}${f.metadata.eids?.length ? ` · EID ${f.metadata.eids.join(", ")}` : ""}`);
+    else if (f.metaPlaceholders?.length) row(null, `Metadata'da boş Zero kayıtları var (${esc(f.metaPlaceholders.join(", "))}) — EID/chain ID/RPC henüz yok`);
+    else row(false, "LayerZero metadata API'sinde Zero kaydı yok");
+    if (f.metaTestnets?.length) row(null, `Zero testnetleri: ${esc(f.metaTestnets.join("; "))}`);
     row(f.rpc?.live ? true : false, f.rpc?.live ? `Canlı RPC: <code>${esc(f.rpc.url)}</code> · chain ID ${f.rpc.chainId} · blok ${f.rpc.block}` : "Canlı Zero RPC bulunamadı");
     row(f.docs ? true : null, f.docs ? `Doküman zaman çizelgesi: ${esc(f.docs)}` : "Doküman zaman çizelgesi okunmadı");
     return `<b>Zero durumu:</b> ${verdict()}\n${lines.join("\n")}`;
@@ -184,17 +187,30 @@ export function startLayerZero(ctx) {
         const r = await http(METADATA_URL, {}, 60000);
         if (!r.ok) throw new Error(`metadata ${r.status}`);
         const j = await r.json();
+        // Her turda baştan hesapla: sadece içi dolu (EID / chain ID / RPC olan) mainnet kaydı "metadata'da var" sayılır
+        S.facts.metadata = null;
+        S.facts.metaPlaceholders = [];
+        S.facts.metaTestnets = [];
         for (const [key, v] of Object.entries(j)) {
           const eids = (v?.deployments || []).map((d) => Number(d.eid)).filter(Boolean);
           if (!ZERO_WORDS.test(key) && !eids.some(isZeroEid)) continue;
           const mainnetEids = eids.filter((e) => e < 40000);
-          if (/testnet|sandbox/i.test(key) || (eids.length && !mainnetEids.length)) {
-            fireOnce(`meta:test:${key}`, `LayerZero metadata'sına Zero test zinciri eklendi: <b>${esc(key)}</b> (EID ${eids.join(", ")}). Mainnet değil.`, "info");
-            continue;
-          }
           const chainId = v?.chainDetails?.nativeChainId ?? null;
           const rpcs = (v?.rpcs || []).map((x) => x?.url).filter((u) => /^https:\/\//.test(u || ""));
           const ep = (v?.deployments || []).find((d) => d.endpointV2?.address)?.endpointV2?.address;
+          const details = `${chainId ? `\nChain ID: ${chainId}` : ""}${rpcs.length ? `\nRPC: ${rpcs.map((u) => `<code>${esc(u)}</code>`).join(", ")}` : ""}${ep ? `\nEndpointV2: <code>${esc(ep)}</code>` : ""}`;
+          if (/testnet|sandbox/i.test(key) || (eids.length && !mainnetEids.length)) {
+            S.facts.metaTestnets.push(`${key} (EID ${eids.join(", ") || "?"}${chainId ? `, chain ID ${chainId}` : ""})`);
+            fireOnce(`meta:test:${key}`, `LayerZero metadata'sına Zero test zinciri eklendi: <b>${esc(key)}</b> (EID ${eids.join(", ")}). Mainnet değil.`, "info");
+            if (chainId || rpcs.length) fireOnce(`meta:test:${key}:${chainId}:${rpcs.join(",")}`, `Zero test zinciri ayrıntıları: <b>${esc(key)}</b>${details}\n\nBu testnet — gerçek para yok, mainnet sinyali değil.`, "info");
+            continue;
+          }
+          if (!mainnetEids.length && !chainId && !rpcs.length) {
+            // Yer tutucu kayıt: isim var, içi boş. Tek başına ağın açıldığı anlamına gelmez.
+            S.facts.metaPlaceholders.push(key);
+            fireOnce(`meta:${key}:${chainId}:${rpcs.join(",")}`, `LayerZero metadata'sında Zero için <b>boş bir kayıt</b> var: <code>${esc(key)}</code> (EID, chain ID ve RPC henüz yok). İçi dolduğunda güçlü sinyal gelecek.`, "info");
+            continue;
+          }
           S.facts.metadata = { key, chainId, eids: mainnetEids, rpcs, endpoint: ep || null };
           for (const e of mainnetEids) if (!S.zeroEids.includes(e)) S.zeroEids.push(e);
           S.seen.rpcCandidates = [...new Set([...(S.seen.rpcCandidates || []), ...rpcs])];
@@ -270,7 +286,7 @@ export function startLayerZero(ctx) {
       async run() {
         const names = [];
         for (const d of CRT_DOMAINS) {
-          const r = await http(`https://crt.sh/?q=%25.${d}&output=json&exclude=expired`, {}, 60000);
+          const r = await http(`https://crt.sh/?q=%25.${d}&output=json&exclude=expired`, {}, 120000);
           if (!r.ok) throw new Error(`crt.sh ${r.status}`);
           for (const c of await r.json()) for (const n of String(c.name_value || "").split("\n")) names.push(n.toLowerCase().replace(/^\*\./, ""));
         }
