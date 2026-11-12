@@ -14,6 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import dns from "node:dns/promises";
 
 const ZRO = "0x6985884c4392d348587b19cb9eaaf157f13271cd"; // Ethereum, Arbitrum, Base'de aynı adres
 const SEL_PEERS = "0xbb0b6a53";                              // peers(uint32)
@@ -27,6 +28,11 @@ const DOCS_INDEX = "https://docs.layerzero.network/llms.txt";
 const CRT_DOMAINS = ["layerzero.network", "layerzero-api.com"];
 // Testnet RPC'si metadata'da testnet.zero.layerzero.network olarak duruyor; mainnet büyük ihtimalle aynı alan adı altında olacak
 const GUESSED_RPCS = ["https://rpc.zero.layerzero.network", "https://mainnet.zero.layerzero.network", "https://zero.layerzero.network", "https://rpc.atlas.zero.layerzero.network", "https://interop.zero.layerzero.network"];
+// DNS'te düzenli olarak denenecek adlar: biri ilk kez çözülmeye başlarsa uyarı
+const DNS_BASES = ["zero.layerzero.network", "mainnet.zero.layerzero.network"];
+const DNS_PREFIXES = ["", "rpc", "ws", "wss", "explorer", "scan", "bridge", "app", "api", "faucet", "status", "portal", "gateway", "indexer", "archive", "prover", "stake", "mainnet", "testnet", "devnet"];
+const DNS_EXTRA = ["atlas.layerzero.network", "rpc.atlas.layerzero.network", "explorer.atlas.layerzero.network", "zeroscan.layerzero.network", "zero-rpc.layerzero.network", "rpc-zero.layerzero.network", "interop.zero.layerzero.network", "rpc.interop.zero.layerzero.network"];
+const DNS_CANDIDATES = [...new Set([...DNS_BASES.flatMap((b) => DNS_PREFIXES.map((p) => (p ? `${p}.${b}` : b))), ...DNS_EXTRA])];
 const ZERO_WORDS = /zero(?!-?knowledge)|atlas|zone/i;
 const SAFETY = "\n\n⚠️ Resmi kaynaklar: layerzero.network, docs.layerzero.network, github.com/LayerZero-Labs, @LayerZero_Core. Bot işlem yapmaz; yeni bir ağa girersen sadece kaybetmeyi göze aldığın küçük bir miktarla gir.";
 
@@ -296,6 +302,36 @@ export function startLayerZero(ctx) {
         const added = diffSet("ghRepos", repos.map((r) => r.full_name));
         const hits = added.filter((n) => ZERO_WORDS.test(n));
         if (hits.length) notify(`LayerZero-Labs GitHub'ında Zero ile ilgili yeni public depo:\n${hits.map((n) => `• https://github.com/${esc(n)}`).join("\n")}`, "hint");
+      },
+    },
+    {
+      id: "dns", name: "Zero alt alan adları (DNS)", every: 120,
+      async run() {
+        const resolves = async (h) => {
+          try { return (await dns.resolve4(h)).length > 0; } catch (e) {
+            if (e?.code === "ENOTFOUND" || e?.code === "ENODATA") return false;
+            try { return (await dns.resolve6(h)).length > 0; } catch { return false; }
+          }
+        };
+        // Joker kayıt (*.zero.layerzero.network) varsa her ad çözülür; o zaman bu kontrol anlamsız
+        S.seen.dnsWildcard ??= {};
+        for (const b of DNS_BASES) S.seen.dnsWildcard[b] = await resolves(`zz-${Date.now().toString(36)}.${b}`);
+        const live = [];
+        for (const h of DNS_CANDIDATES) {
+          const base = DNS_BASES.find((b) => h.endsWith("." + b));
+          if (base && S.seen.dnsWildcard[base]) continue;
+          if (await resolves(h)) live.push(h);
+        }
+        const first = !S.seen.dnsLive;
+        const prev = new Set(S.seen.dnsLive || []);
+        const added = live.filter((h) => !prev.has(h));
+        S.seen.dnsLive = [...new Set([...prev, ...live])];
+        for (const h of live) if (/(^|\.)(rpc|ws|wss)\./.test(h) && !/testnet|devnet/.test(h)) S.seen.rpcCandidates = [...new Set([...(S.seen.rpcCandidates || []), `https://${h}`])];
+        if (!added.length) return;
+        const list = added.map((h) => `• <code>${esc(h)}</code>${/testnet|devnet/.test(h) ? " (test)" : ""}`).join("\n");
+        notify(first
+          ? `DNS izleyicisi başladı. Şu an çözülen Zero adresleri:\n${list}`
+          : `Daha önce olmayan alan adı artık DNS'te çözülüyor:\n${list}\n\nArkasında bir servisin cevap verdiği ya da mainnet olduğu kanıtlanmadı.${added.some((h) => /(^|\.)(rpc|ws|wss)\./.test(h)) ? " RPC adresleri dakikalık denemeye eklendi." : ""}`, "hint");
       },
     },
     {
