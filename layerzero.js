@@ -61,9 +61,9 @@ const HEAD = {
 export function startLayerZero(ctx) {
   const { http, gh, send, esc, dataDir, ethRpc } = ctx;
   const CHAINS = [
-    { name: "Ethereum", loc: "Ethereum'daki", rpc: ethRpc, selfEid: 30110, explorer: "https://etherscan.io" },   // self-test: Ethereum'daki ZRO'nun Arbitrum peer'ı dolu olmalı
-    { name: "Arbitrum", loc: "Arbitrum'daki", rpc: process.env.ARB_RPC_URL || "https://arbitrum-one-rpc.publicnode.com", selfEid: 30101, explorer: "https://arbiscan.io" },
-    { name: "Base", loc: "Base'deki", rpc: process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com", selfEid: 30101, explorer: "https://basescan.org" },
+    { name: "Ethereum", loc: "Ethereum'daki", rpc: ethRpc, selfEid: 30110, explorer: "https://etherscan.io", logsRpc: process.env.ETH_LOGS_RPC_URL || "https://eth.drpc.org" },   // self-test: Ethereum'daki ZRO'nun Arbitrum peer'ı dolu olmalı
+    { name: "Arbitrum", loc: "Arbitrum'daki", rpc: process.env.ARB_RPC_URL || "https://arbitrum-one-rpc.publicnode.com", selfEid: 30101, explorer: "https://arbiscan.io", logsRpc: process.env.ARB_LOGS_RPC_URL || "https://arbitrum.drpc.org" },
+    { name: "Base", loc: "Base'deki", rpc: process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com", selfEid: 30101, explorer: "https://basescan.org", logsRpc: process.env.BASE_LOGS_RPC_URL || "https://base.drpc.org" },
   ];
   const FILE = path.join(dataDir, "lz-state.json");
   let S = {};
@@ -373,13 +373,18 @@ export function startLayerZero(ctx) {
               if (!isZero(lib)) fireOnce(`ep:lib:${c.name}:${eid}`, `${c.loc} LayerZero EndpointV2'de <b>Zero (EID ${eid})</b> için varsayılan gönderim kütüphanesi ayarlandı:\n<code>${addr(lib)}</code>\n\nLayerZero Zero'ya giden yolu açıyor; uygulamalar artık Zero'ya mesaj gönderecek şekilde ayarlanabilir.`, "strong");
               if (!isZero(sup)) fireOnce(`ep:sup:${c.name}:${eid}`, `${c.loc} EndpointV2 artık <b>Zero (EID ${eid})</b> destekliyor (isSupportedEid = true).`, "strong");
             }
-            // 2) Olaylar: son bloklardaki yol ayarları ve HERHANGİ bir OApp'in Zero'ya peer eklemesi
-            const latest = parseInt(await rpc(c.rpc, "eth_blockNumber"), 16) - 2; // yük dengeleyicide geride kalan düğümler için pay
-            const span = c.name === "Arbitrum" ? 3000 : 1000;
-            const from = S.seen.epBlock[c.name] ? S.seen.epBlock[c.name] + 1 : latest - 20;
-            if (from <= latest) {
+            // 2) Olaylar. publicnode adres filtresi olmadan getLogs kabul etmiyor:
+            //    (a) EndpointV2'nin kendi olayları ana RPC'den (adresli), (b) tüm kontratlar (ULN ayarları,
+            //    her OApp'in PeerSet'i) adres filtresiz sorguyu kabul eden ikinci RPC'den. Ayrı imleçler.
+            const scan = async (key, url, address, span) => {
+              S.seen[key] ??= {};
+              const latest = parseInt(await rpc(url, "eth_blockNumber"), 16) - 2; // geride kalan düğümler için pay
+              const from = S.seen[key][c.name] ? S.seen[key][c.name] + 1 : latest - 20;
+              if (from > latest) return;
               const to = Math.min(latest, from + span - 1);
-              const logs = await rpc(c.rpc, "eth_getLogs", [{ topics: [Object.keys(CONFIG_TOPICS)], fromBlock: "0x" + from.toString(16), toBlock: "0x" + to.toString(16) }]);
+              const q = { topics: [Object.keys(CONFIG_TOPICS)], fromBlock: "0x" + from.toString(16), toBlock: "0x" + to.toString(16) };
+              if (address) q.address = address;
+              const logs = await rpc(url, "eth_getLogs", [q]);
               for (const l of logs || []) {
                 const name = CONFIG_TOPICS[l.topics[0]];
                 const words = (l.data.slice(2).match(/.{64}/g) || []);
@@ -387,12 +392,13 @@ export function startLayerZero(ctx) {
                 if (hit === undefined) continue;
                 if (name === "PeerSet" && c.name === "Ethereum" && l.address.toLowerCase() === ZRO) continue; // "peerlog" zaten bildiriyor
                 if (name === "PeerSet") S.facts.oappPeers = [...new Set([...(S.facts.oappPeers || []), `${c.name}:${l.address}`])];
-                const isEp = l.address.toLowerCase() === ENDPOINT_V2;
-                const level = name === "PeerSet" || isEp || name.startsWith("Default") ? "strong" : "hint";
-                fireOnce(`ep:log:${c.name}:${l.transactionHash}:${l.logIndex}`, `${c.loc} <b>${name}</b> olayı — <b>Zero (EID ${hit})</b>\nKontrat: <code>${l.address}</code>${name === "PeerSet" ? `\nPeer: <code>${addr("0x" + (words[1] || ""))}</code>\n\nBir uygulama (token/köprü) kendini Zero'ya bağladı.` : "\n\nLayerZero Zero yolunu yapılandırıyor."}\nİşlem: ${c.explorer}/tx/${l.transactionHash}`, level);
+                fireOnce(`ep:log:${c.name}:${l.transactionHash}:${l.logIndex}`, `${c.loc} <b>${name}</b> olayı — <b>Zero (EID ${hit})</b>\nKontrat: <code>${l.address}</code>${name === "PeerSet" ? `\nPeer: <code>${addr("0x" + (words[1] || ""))}</code>\n\nBir uygulama (token/köprü) kendini Zero'ya bağladı.` : "\n\nLayerZero Zero yolunu yapılandırıyor."}\nİşlem: ${c.explorer}/tx/${l.transactionHash}`, "strong");
               }
-              S.seen.epBlock[c.name] = to;
-            }
+              S.seen[key][c.name] = to;
+            };
+            await scan("epBlock", c.rpc, ENDPOINT_V2, c.name === "Arbitrum" ? 3000 : 1000);
+            try { await scan("epBlockAll", c.logsRpc, null, c.name === "Arbitrum" ? 1000 : 500); }
+            catch (e) { console.error(`[lz:endpoint] ${c.name} tüm kontratlar:`, e?.message || e); }
             ok++;
           } catch (e) { console.error(`[lz:endpoint] ${c.name}:`, e?.message || e); }
         }
