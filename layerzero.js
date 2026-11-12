@@ -75,6 +75,15 @@ export function startLayerZero(ctx) {
     const p = new Set(prev);
     return current.filter((x) => !p.has(x));
   };
+  // Birikimli: bir kez görülen değer bir daha "yeni" sayılmaz. crt.sh/doküman gibi
+  // her seferinde eksik ya da farklı liste dönebilen kaynaklarda tekrar uyarıyı önler.
+  const diffSetCumulative = (key, current) => {
+    const prev = S.seen[key];
+    const p = new Set(prev || []);
+    const added = current.filter((x) => !p.has(x));
+    S.seen[key] = [...p, ...added];
+    return prev ? added : [];
+  };
 
   async function rpc(url, method, params = []) {
     const r = await http(url, {
@@ -273,7 +282,7 @@ export function startLayerZero(ctx) {
           const ix = await http(DOCS_INDEX);
           if (ix.ok) {
             const pages = ((await ix.text()).match(/https:\/\/docs\.layerzero\.network\/[^\s)]+/g) || []).filter((u) => /zero|atlas|chain\/|zone/i.test(u));
-            const added = diffSet("docsPages", [...new Set([...pages, ...urls])]);
+            const added = diffSetCumulative("docsPages", [...new Set([...pages, ...urls])]);
             if (added.length) notify(`LayerZero dokümanına Zero/ATLAS ile ilgili yeni sayfa eklendi:\n${added.slice(0, 8).map((u) => "• " + esc(u)).join("\n")}`, "hint");
           }
         } catch {}
@@ -298,8 +307,15 @@ export function startLayerZero(ctx) {
           if (!r.ok) throw new Error(`crt.sh ${r.status}`);
           for (const c of await r.json()) for (const n of String(c.name_value || "").split("\n")) names.push(n.toLowerCase().replace(/^\*\./, ""));
         }
-        const interesting = [...new Set(names)].filter((n) => ZERO_WORDS.test(n) || /(^|\.)(rpc|explorer|scan|bridge|mainnet)[.-]/.test(n));
-        const added = diffSet("crt", interesting);
+        // Kök alan adı ("layerzero.network") zaten "zero" içerdiği için eşleşmeyi sadece alt alan adında ara;
+        // yoksa trust./enterprise. gibi her şey "ilginç" sayılıyordu. Testnet adları mainnet ipucu değil.
+        const sub = (n) => { const d = CRT_DOMAINS.find((x) => n === x || n.endsWith("." + x)); return d ? n.slice(0, -d.length).replace(/\.$/, "") : n; };
+        const interesting = [...new Set(names)].filter((n) => {
+          const s = sub(n);
+          if (!s || /(^|\.)(testnet|sepolia|devnet|staging)(\.|$)/.test(s)) return false;
+          return ZERO_WORDS.test(s) || /(^|\.)(rpc|explorer|scan|bridge|mainnet)([.-]|$)/.test(s);
+        });
+        const added = diffSetCumulative("crt2", interesting);
         if (added.length) {
           for (const n of added) if (/rpc/.test(n)) S.seen.rpcCandidates = [...new Set([...(S.seen.rpcCandidates || []), `https://${n}`])];
           notify(`LayerZero alan adlarında yeni sertifika alındı:\n${added.slice(0, 10).map((n) => `• <code>${esc(n)}</code>`).join("\n")}${added.some((n) => /rpc/.test(n)) ? "\n\nRPC adresleri dakikalık denemeye eklendi." : ""}`, "hint");
