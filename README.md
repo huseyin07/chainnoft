@@ -64,6 +64,13 @@ Ekip doküman ve GitHub'ı güncellemeden açsa bile Ethereum'daki deploy, RPC s
 | Resmi doküman | 5 dk | Zero sayfasındaki zaman çizelgesi değişti mi; yeni Zero/ATLAS sayfaları |
 | GitHub LayerZero-Labs | 10 dk | Adında zero/atlas/zone geçen yeni public depo |
 | SSL sertifikaları (crt.sh) | 20 dk | layerzero.network ve layerzero-api.com'da zero/rpc/explorer/bridge sertifikaları |
+| SSL sertifikaları (Cert Spotter) | 5 dk | crt.sh'nin yedeği; aynı liste, aynı ad iki kez bildirilmez |
+| DNS | 1 dk | zero.layerzero.network altındaki ~100 olası ad (rpc, explorer, bridge, scan…) ilk kez çözüldüğünde |
+| HTTP yoklaması | 1,5 dk | Çözülen adreslerin cevabı değişti mi; Blockscout explorer'ın `envs.js` dosyasından ağ adı, chain ID ve RPC; `/api/eth-rpc` chain ID |
+| EndpointV2 (Ethereum, Arbitrum, Base) | 1 dk | `isSupportedEid` / `defaultSendLibrary(33002)`; Zero için varsayılan kütüphane, ULN ve Executor ayarı olayları; **herhangi bir** uygulamanın Zero'ya `PeerSet` yapması |
+| GitHub etkinlikleri | 3 dk | LayerZero-Labs'ta Zero/mainnet/3300x geçen push, PR, release, branch |
+| npm `@layerzerolabs` paketleri | 10 dk | Adında zero/atlas geçen yeni paket |
+| Site haritaları | 10 dk | layerzero.network ve dokümanda Zero ile ilgili yeni sayfa |
 
 Seviyeler: 🟣 bilgi · 🟣🔎 ipucu · 🟣🟠 güçlü sinyal · 🟣🚨 zincir üstünde doğrulandı (RPC canlı + chain ID metadata ile eşleşiyor + ZRO köprü kontratı Zero'da mevcut).
 

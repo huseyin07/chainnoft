@@ -30,9 +30,24 @@ const CRT_DOMAINS = ["layerzero.network", "layerzero-api.com"];
 const GUESSED_RPCS = ["https://rpc.zero.layerzero.network", "https://mainnet.zero.layerzero.network", "https://zero.layerzero.network", "https://rpc.atlas.zero.layerzero.network", "https://interop.zero.layerzero.network"];
 // DNS'te düzenli olarak denenecek adlar: biri ilk kez çözülmeye başlarsa uyarı
 const DNS_BASES = ["zero.layerzero.network", "mainnet.zero.layerzero.network"];
-const DNS_PREFIXES = ["", "rpc", "ws", "wss", "explorer", "scan", "bridge", "app", "api", "faucet", "status", "portal", "gateway", "indexer", "archive", "prover", "stake", "mainnet", "testnet", "devnet"];
+const DNS_PREFIXES = ["", "rpc", "ws", "wss", "explorer", "scan", "bridge", "app", "api", "faucet", "status", "portal", "gateway", "indexer", "archive", "prover", "stake", "mainnet", "testnet", "devnet",
+  "rpc-mainnet", "mainnet-rpc", "node", "nodes", "chain", "blockscout", "stats", "explorer-api", "api-explorer", "bridge-api", "graph", "subgraph", "dvn", "executor", "relayer", "og", "da", "sequencer", "docs", "www", "launch", "claim", "airdrop"];
 const DNS_EXTRA = ["atlas.layerzero.network", "rpc.atlas.layerzero.network", "explorer.atlas.layerzero.network", "zeroscan.layerzero.network", "zero-rpc.layerzero.network", "rpc-zero.layerzero.network", "interop.zero.layerzero.network", "rpc.interop.zero.layerzero.network"];
 const DNS_CANDIDATES = [...new Set([...DNS_BASES.flatMap((b) => DNS_PREFIXES.map((p) => (p ? `${p}.${b}` : b))), ...DNS_EXTRA])];
+// EndpointV2 tüm EVM zincirlerinde aynı adreste. Yeni bir zincir açılmadan önce LayerZero bu kontratta
+// o zincirin EID'si için varsayılan kütüphaneleri ve ULN/Executor ayarlarını yapar — zincir üstünde en erken iz.
+const ENDPOINT_V2 = "0x1a44076050125825900e736c501f859c50fe728c";
+const SEL_IS_SUPPORTED = "0x6750cd4c";   // isSupportedEid(uint32)
+const SEL_DEFAULT_SEND = "0xf64be4c7";   // defaultSendLibrary(uint32)
+const CONFIG_TOPICS = {
+  "0x16aa0f528038ab41019e95bae5b418a50ba8532c5800e3b7ea2f517d3fa625f5": "DefaultSendLibrarySet",
+  "0xc16891855cffb4a5ac51ac11864a3f3c96ba816cc45fe686c987ae36277de5ec": "DefaultReceiveLibrarySet",
+  "0x55b28633cdb29709386f555dfc54418592ad475ce7a65a78ac5928af60ffb8f8": "DefaultReceiveLibraryTimeoutSet",
+  "0xaaf3aaa0c11056e86ac56eb653e25b005ca1a7d4dcd21ba24647f7ab63f3b560": "DefaultUlnConfigsSet",
+  "0x2b001e1c6683bf79cc52891bd7215b204c787d18134fc7f3d21b4f32a49e47de": "DefaultExecutorConfigsSet",
+  "0x238399d427b947898edb290f5ff0f9109849b1c3ba196a42e35f00c50a54b98b": "PeerSet",
+};
+const SITEMAPS = ["https://layerzero.network/sitemap.xml", "https://docs.layerzero.network/sitemap.xml"];
 const ZERO_WORDS = /zero(?!-?knowledge)|atlas|zone/i;
 const SAFETY = "\n\n⚠️ Resmi kaynaklar: layerzero.network, docs.layerzero.network, github.com/LayerZero-Labs, @LayerZero_Core. Bot işlem yapmaz; yeni bir ağa girersen sadece kaybetmeyi göze aldığın küçük bir miktarla gir.";
 
@@ -46,9 +61,9 @@ const HEAD = {
 export function startLayerZero(ctx) {
   const { http, gh, send, esc, dataDir, ethRpc } = ctx;
   const CHAINS = [
-    { name: "Ethereum", loc: "Ethereum'daki", rpc: ethRpc, selfEid: 30110 },   // self-test: Ethereum'daki ZRO'nun Arbitrum peer'ı dolu olmalı
-    { name: "Arbitrum", loc: "Arbitrum'daki", rpc: process.env.ARB_RPC_URL || "https://arbitrum-one-rpc.publicnode.com", selfEid: 30101 },
-    { name: "Base", loc: "Base'deki", rpc: process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com", selfEid: 30101 },
+    { name: "Ethereum", loc: "Ethereum'daki", rpc: ethRpc, selfEid: 30110, explorer: "https://etherscan.io" },   // self-test: Ethereum'daki ZRO'nun Arbitrum peer'ı dolu olmalı
+    { name: "Arbitrum", loc: "Arbitrum'daki", rpc: process.env.ARB_RPC_URL || "https://arbitrum-one-rpc.publicnode.com", selfEid: 30101, explorer: "https://arbiscan.io" },
+    { name: "Base", loc: "Base'deki", rpc: process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com", selfEid: 30101, explorer: "https://basescan.org" },
   ];
   const FILE = path.join(dataDir, "lz-state.json");
   let S = {};
@@ -106,6 +121,9 @@ export function startLayerZero(ctx) {
   const isZero = (h) => !h || /^0x0*$/.test(h);
   const addr = (b32) => "0x" + b32.slice(-40);
   const isZeroEid = (eid) => S.zeroEids.includes(eid) || (eid >= 33000 && eid < 34000);
+  // "layerzero" kelimesinin kendisi "zero" içerdiği için onu çıkarıp bak
+  const zeroish = (t) => ZERO_WORDS.test(String(t || "").replace(/layer[-_ ]?zero/gi, ""));
+  const addRpc = (u) => { if (/^https?:\/\//.test(u || "") && !/testnet|sepolia|devnet/i.test(u)) S.seen.rpcCandidates = [...new Set([...(S.seen.rpcCandidates || []), u.replace(/\/$/, "")])]; };
 
   // ---------- kesinlik özeti ----------
   function factsText() {
@@ -115,6 +133,9 @@ export function startLayerZero(ctx) {
     const peers = f.peers || {};
     const set = Object.entries(peers).filter(([, v]) => v);
     row(set.length ? true : false, set.length ? `ZRO köprüsü Zero'ya bağlandı: ${set.map(([k, v]) => `${k} → <code>${v}</code>`).join(", ")}` : "ZRO kontratında Zero peer'ı yok (henüz ZRO gönderilemez)");
+    const ep = Object.entries(f.endpoint || {}).filter(([, v]) => v?.sendLib || v?.supported);
+    row(ep.length ? true : false, ep.length ? `EndpointV2'de Zero yolu ayarlı: ${ep.map(([k]) => k).join(", ")}` : "EndpointV2'de Zero için varsayılan kütüphane yok (yol açılmadı)");
+    if (f.oappPeers?.length) row(true, `Zero'ya peer ekleyen uygulamalar: ${f.oappPeers.slice(0, 5).map((x) => `<code>${esc(x)}</code>`).join(", ")}`);
     if (f.metadata) row(true, `LayerZero metadata'da: <b>${esc(f.metadata.key)}</b>${f.metadata.chainId ? ` · chain ID ${f.metadata.chainId}` : ""}${f.metadata.eids?.length ? ` · EID ${f.metadata.eids.join(", ")}` : ""}`);
     else if (f.metaPlaceholders?.length) row(null, `Metadata'da boş Zero kayıtları var (${esc(f.metaPlaceholders.join(", "))}) — EID/chain ID/RPC henüz yok`);
     else row(false, "LayerZero metadata API'sinde Zero kaydı yok");
@@ -127,6 +148,7 @@ export function startLayerZero(ctx) {
     const f = S.facts;
     if (f.rpc?.live && f.rpc.peerCode) return "🟢 Zero canlı ve ZRO köprüsü zincir üstünde doğrulandı";
     if (f.rpc?.live) return "🟠 Zero RPC canlı, köprü kontratı henüz doğrulanmadı";
+    if (Object.values(f.endpoint || {}).some((v) => v?.supported) || f.oappPeers?.length) return "🟠 LayerZero Zero yolunu zincir üstünde açtı — ağ açılıyor olabilir";
     if (Object.values(f.peers || {}).some(Boolean)) return "🟠 ZRO köprüsü Zero'ya bağlandı — ağ açılıyor olabilir";
     if (f.metadata) return "🟡 Zero LayerZero altyapısına eklendi, canlı RPC yok";
     return "⚪ Zero'nun açıldığına dair zincir üstü iz yok";
@@ -159,7 +181,7 @@ export function startLayerZero(ctx) {
     {
       id: "peerlog", name: "ZRO PeerSet olayları (Ethereum)", every: 300,
       async run() {
-        const latest = parseInt(await rpc(ethRpc, "eth_blockNumber"), 16);
+        const latest = parseInt(await rpc(ethRpc, "eth_blockNumber"), 16) - 2; // geride kalan düğümler için pay
         const from = S.seen.peerlogBlock ? S.seen.peerlogBlock + 1 : latest - 50;
         if (from > latest) return;
         const to = Math.min(latest, from + 1999);
@@ -305,7 +327,7 @@ export function startLayerZero(ctx) {
       },
     },
     {
-      id: "dns", name: "Zero alt alan adları (DNS)", every: 120,
+      id: "dns", name: "Zero alt alan adları (DNS)", every: 60,
       async run() {
         const resolves = async (h) => {
           try { return (await dns.resolve4(h)).length > 0; } catch (e) {
@@ -332,6 +354,160 @@ export function startLayerZero(ctx) {
         notify(first
           ? `DNS izleyicisi başladı. Şu an çözülen Zero adresleri:\n${list}`
           : `Daha önce olmayan alan adı artık DNS'te çözülüyor:\n${list}\n\nArkasında bir servisin cevap verdiği ya da mainnet olduğu kanıtlanmadı.${added.some((h) => /(^|\.)(rpc|ws|wss)\./.test(h)) ? " RPC adresleri dakikalık denemeye eklendi." : ""}`, "hint");
+      },
+    },
+    {
+      id: "endpoint", name: "EndpointV2 — Zero yol ayarları (Ethereum/Arbitrum/Base, tüm OApp peer'ları)", every: 60,
+      async run() {
+        S.seen.epBlock ??= {}; S.facts.endpoint ??= {};
+        let ok = 0;
+        for (const c of CHAINS) {
+          try {
+            // 1) Durum: EndpointV2 Zero'yu destekliyor mu? (self-test: bilinen bir EID true dönmeli)
+            const selfOk = await rpc(c.rpc, "eth_call", [{ to: ENDPOINT_V2, data: SEL_IS_SUPPORTED + eidHex(c.selfEid) }, "latest"]);
+            if (isZero(selfOk)) throw new Error(`${c.name}: bilinen EID desteklenmiyor görünüyor, kontrol güvenilir değil`);
+            for (const eid of S.zeroEids) {
+              const sup = await rpc(c.rpc, "eth_call", [{ to: ENDPOINT_V2, data: SEL_IS_SUPPORTED + eidHex(eid) }, "latest"]);
+              const lib = await rpc(c.rpc, "eth_call", [{ to: ENDPOINT_V2, data: SEL_DEFAULT_SEND + eidHex(eid) }, "latest"]);
+              S.facts.endpoint[`${c.name}:${eid}`] = { supported: !isZero(sup), sendLib: isZero(lib) ? null : addr(lib) };
+              if (!isZero(lib)) fireOnce(`ep:lib:${c.name}:${eid}`, `${c.loc} LayerZero EndpointV2'de <b>Zero (EID ${eid})</b> için varsayılan gönderim kütüphanesi ayarlandı:\n<code>${addr(lib)}</code>\n\nLayerZero Zero'ya giden yolu açıyor; uygulamalar artık Zero'ya mesaj gönderecek şekilde ayarlanabilir.`, "strong");
+              if (!isZero(sup)) fireOnce(`ep:sup:${c.name}:${eid}`, `${c.loc} EndpointV2 artık <b>Zero (EID ${eid})</b> destekliyor (isSupportedEid = true).`, "strong");
+            }
+            // 2) Olaylar: son bloklardaki yol ayarları ve HERHANGİ bir OApp'in Zero'ya peer eklemesi
+            const latest = parseInt(await rpc(c.rpc, "eth_blockNumber"), 16) - 2; // yük dengeleyicide geride kalan düğümler için pay
+            const span = c.name === "Arbitrum" ? 3000 : 1000;
+            const from = S.seen.epBlock[c.name] ? S.seen.epBlock[c.name] + 1 : latest - 20;
+            if (from <= latest) {
+              const to = Math.min(latest, from + span - 1);
+              const logs = await rpc(c.rpc, "eth_getLogs", [{ topics: [Object.keys(CONFIG_TOPICS)], fromBlock: "0x" + from.toString(16), toBlock: "0x" + to.toString(16) }]);
+              for (const l of logs || []) {
+                const name = CONFIG_TOPICS[l.topics[0]];
+                const words = (l.data.slice(2).match(/.{64}/g) || []);
+                const hit = S.zeroEids.find((e) => (name === "PeerSet" || name.startsWith("DefaultSend") || name.startsWith("DefaultReceive")) ? parseInt(words[0] || "0", 16) === e : words.some((w) => parseInt(w, 16) === e));
+                if (hit === undefined) continue;
+                if (name === "PeerSet" && c.name === "Ethereum" && l.address.toLowerCase() === ZRO) continue; // "peerlog" zaten bildiriyor
+                if (name === "PeerSet") S.facts.oappPeers = [...new Set([...(S.facts.oappPeers || []), `${c.name}:${l.address}`])];
+                const isEp = l.address.toLowerCase() === ENDPOINT_V2;
+                const level = name === "PeerSet" || isEp || name.startsWith("Default") ? "strong" : "hint";
+                fireOnce(`ep:log:${c.name}:${l.transactionHash}:${l.logIndex}`, `${c.loc} <b>${name}</b> olayı — <b>Zero (EID ${hit})</b>\nKontrat: <code>${l.address}</code>${name === "PeerSet" ? `\nPeer: <code>${addr("0x" + (words[1] || ""))}</code>\n\nBir uygulama (token/köprü) kendini Zero'ya bağladı.` : "\n\nLayerZero Zero yolunu yapılandırıyor."}\nİşlem: ${c.explorer}/tx/${l.transactionHash}`, level);
+              }
+              S.seen.epBlock[c.name] = to;
+            }
+            ok++;
+          } catch (e) { console.error(`[lz:endpoint] ${c.name}:`, e?.message || e); }
+        }
+        if (!ok) throw new Error("hiçbir zincir okunamadı");
+      },
+    },
+    {
+      id: "probe", name: "Zero adreslerine HTTP yoklaması (explorer/RPC sayfaları)", every: 90,
+      async run() {
+        S.seen.probe ??= {}; S.facts.probe ??= {};
+        const hosts = [...new Set([...(S.seen.dnsLive || []), ...GUESSED_RPCS.map((u) => new URL(u).host)])];
+        for (const h of hosts) {
+          const base = `https://${h}`;
+          let sig = "erişilemiyor", info = "";
+          try {
+            const r = await http(base + "/", { redirect: "follow", headers: { "User-Agent": "Mozilla/5.0" } }, 15000);
+            const body = (await r.text()).slice(0, 200000);
+            const title = (body.match(/<title[^>]*>([^<]{0,120})/i) || [])[1]?.trim() || "";
+            sig = `HTTP ${r.status}${title ? ` · ${title}` : ""}`;
+            if (zeroish(body.replace(/testnet/gi, "")) && /mainnet/i.test(body)) info += "\nSayfada \"mainnet\" geçiyor.";
+          } catch {}
+          // Blockscout tabanlı explorer'lar yapılandırmayı açıkta tutar: ağ adı, chain ID, RPC
+          try {
+            const r = await http(base + "/assets/envs.js", {}, 10000);
+            if (r.ok) {
+              const t = await r.text();
+              const g = (k) => (t.match(new RegExp(k + "\\s*[:=]\\s*[\"']([^\"']+)")) || [])[1];
+              const net = g("NEXT_PUBLIC_NETWORK_NAME"), id = g("NEXT_PUBLIC_NETWORK_ID"), rpcUrl = g("NEXT_PUBLIC_NETWORK_RPC_URL");
+              if (net || id || rpcUrl) {
+                sig += ` · ${net || "?"} / chain ${id || "?"}`;
+                info += `\nExplorer yapılandırması: ağ <b>${esc(net || "?")}</b>, chain ID <b>${esc(id || "?")}</b>${rpcUrl ? `, RPC <code>${esc(rpcUrl)}</code>` : ""}`;
+                for (const u of String(rpcUrl || "").split(",")) addRpc(u.trim());
+                S.facts.probe[h] = { net, id, rpc: rpcUrl };
+              }
+            }
+          } catch {}
+          try {
+            const id = parseInt(await rpc(base + "/api/eth-rpc", "eth_chainId"), 16);
+            if (id) { sig += ` · eth-rpc ${id}`; info += `\nExplorer'ın JSON-RPC'si cevap veriyor: chain ID <b>${id}</b>`; }
+          } catch {}
+          const prev = S.seen.probe[h];
+          if (sig === "erişilemiyor" && prev !== undefined) continue; // anlık bağlantı hatası değişiklik sayılmaz
+          S.seen.probe[h] = sig;
+          if (prev === undefined && sig === "erişilemiyor") continue;
+          if (prev === sig) continue;
+          const test = /testnet|devnet/.test(h) || (S.testnetChainIds || []).some((t) => sig.includes(`chain ${t}`) || sig.includes(`eth-rpc ${t}`));
+          notify(`<code>${esc(h)}</code> ${prev === undefined ? "yoklandı" : "değişti"}:\n${prev !== undefined ? `Önce: ${esc(prev)}\n` : ""}Şimdi: <b>${esc(sig)}</b>${info}${test ? "\n\n(Testnet adresi ya da testnet chain ID'si — mainnet sinyali değil.)" : ""}`, "hint");
+        }
+      },
+    },
+    {
+      id: "certspotter", name: "SSL sertifikaları (Cert Spotter, crt.sh yedeği)", every: 300, quiet: true,
+      async run() {
+        let names = [];
+        for (const d of CRT_DOMAINS) {
+          S.seen.csAfter ??= {};
+          const after = S.seen.csAfter[d] ? `&after=${S.seen.csAfter[d]}` : "";
+          const r = await http(`https://api.certspotter.com/v1/issuances?domain=${d}&include_subdomains=true&expand=dns_names${after}`, {}, 30000);
+          if (!r.ok) throw new Error(`certspotter ${r.status}`);
+          const j = await r.json();
+          for (const c of j) for (const n of c.dns_names || []) names.push(n.toLowerCase().replace(/^\*\./, ""));
+          if (j.length) S.seen.csAfter[d] = j[j.length - 1].id;
+        }
+        const sub = (n) => { const d = CRT_DOMAINS.find((x) => n === x || n.endsWith("." + x)); return d ? n.slice(0, -d.length).replace(/\.$/, "") : n; };
+        names = [...new Set(names)].filter((n) => { const x = sub(n); return x && !/(^|\.)(testnet|sepolia|devnet|staging)(\.|$)/.test(x) && (ZERO_WORDS.test(x) || /(^|\.)(rpc|explorer|scan|bridge|mainnet)([.-]|$)/.test(x)); });
+        const added = diffSetCumulative("crt2", names); // crt.sh ile aynı liste: aynı ad iki kez bildirilmez
+        for (const n of added) if (/rpc/.test(n)) addRpc(`https://${n}`);
+        if (added.length) notify(`LayerZero alan adlarında yeni sertifika (Cert Spotter):\n${added.slice(0, 10).map((n) => `• <code>${esc(n)}</code>`).join("\n")}`, "hint");
+      },
+    },
+    {
+      id: "ghevents", name: "GitHub LayerZero-Labs etkinlikleri (push/PR/release/branch)", every: 180,
+      async run() {
+        const ev = await gh("orgs/LayerZero-Labs/events?per_page=100");
+        if (!ev) throw new Error("etkinlikler okunamadı");
+        const seen = new Set(S.seen.ghEvents || []);
+        const first = !S.seen.ghEvents;
+        for (const e of ev.slice().reverse()) {
+          if (seen.has(e.id)) continue;
+          seen.add(e.id);
+          if (first) continue;
+          const p = e.payload || {};
+          const texts = [e.repo?.name, p.ref, p.ref_type, p.pull_request?.title, p.pull_request?.head?.ref, p.release?.name, p.release?.tag_name, ...(p.commits || []).map((c) => c.message)].filter(Boolean).join("\n");
+          if (!(zeroish(texts) || /\b3300\d\b|zero[-_ ]?mainnet|zerointerop/i.test(texts))) continue;
+          const url = p.pull_request?.html_url || p.release?.html_url || `https://github.com/${e.repo?.name}`;
+          notify(`LayerZero-Labs GitHub'ında Zero ile ilgili hareket (<b>${esc(e.type)}</b>):\nDepo: <code>${esc(e.repo?.name)}</code>\n${esc(texts.replace(e.repo?.name || "", "").trim().slice(0, 400))}\n${url}`, "hint");
+        }
+        S.seen.ghEvents = [...seen].slice(-500);
+      },
+    },
+    {
+      id: "npmscope", name: "npm @layerzerolabs yeni paketler", every: 600,
+      async run() {
+        const r = await http("https://registry.npmjs.org/-/v1/search?text=scope:layerzerolabs&size=250", {}, 30000);
+        if (!r.ok) throw new Error(`npm arama ${r.status}`);
+        const names = ((await r.json()).objects || []).map((o) => o.package?.name).filter(Boolean);
+        const added = diffSetCumulative("npmScope", names).filter((n) => zeroish(n.replace("@layerzerolabs/", "")));
+        if (added.length) notify(`npm'de Zero ile ilgili yeni LayerZero paketi:\n${added.map((n) => `• https://www.npmjs.com/package/${esc(n)}`).join("\n")}`, "hint");
+      },
+    },
+    {
+      id: "sitemap", name: "layerzero.network site haritası (yeni sayfalar)", every: 600, quiet: true,
+      async run() {
+        const urls = [];
+        for (const u of SITEMAPS) {
+          try {
+            const r = await http(u, { headers: { "User-Agent": "Mozilla/5.0" } }, 30000);
+            if (!r.ok) continue;
+            const t = await r.text();
+            urls.push(...[...t.matchAll(/<loc>([^<]+)<\/loc>/g)].map((m) => m[1].trim()));
+          } catch {}
+        }
+        if (!urls.length) throw new Error("site haritası okunamadı");
+        const added = diffSetCumulative("sitemap", [...new Set(urls)]).filter((u) => zeroish(u.replace(/^https?:\/\/[^/]+/, "")));
+        if (added.length) notify(`LayerZero sitesine Zero ile ilgili yeni sayfa eklendi:\n${added.slice(0, 8).map((u) => "• " + esc(u)).join("\n")}`, "hint");
       },
     },
     {
