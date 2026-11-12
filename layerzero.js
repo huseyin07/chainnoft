@@ -63,7 +63,7 @@ export function startLayerZero(ctx) {
   const CHAINS = [
     { name: "Ethereum", loc: "Ethereum'daki", rpc: ethRpc, selfEid: 30110, explorer: "https://etherscan.io", logsRpcs: [process.env.ETH_LOGS_RPC_URL, "https://eth.drpc.org", "https://eth.llamarpc.com", "https://ethereum-rpc.publicnode.com"].filter(Boolean) },   // self-test: Ethereum'daki ZRO'nun Arbitrum peer'ı dolu olmalı
     { name: "Arbitrum", loc: "Arbitrum'daki", rpc: process.env.ARB_RPC_URL || "https://arbitrum-one-rpc.publicnode.com", selfEid: 30101, explorer: "https://arbiscan.io", logsRpcs: [process.env.ARB_LOGS_RPC_URL, "https://arb1.arbitrum.io/rpc", "https://arbitrum.drpc.org", "https://arbitrum.llamarpc.com"].filter(Boolean) },
-    { name: "Base", loc: "Base'deki", rpc: process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com", selfEid: 30101, explorer: "https://basescan.org", logsRpcs: [process.env.BASE_LOGS_RPC_URL, "https://mainnet.base.org", "https://base.llamarpc.com", "https://base.drpc.org"].filter(Boolean) },
+    { name: "Base", loc: "Base'deki", rpc: process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com", selfEid: 30101, explorer: "https://basescan.org", logsRpcs: [process.env.BASE_LOGS_RPC_URL, "https://mainnet.base.org", "https://base.llamarpc.com", "https://base.drpc.org", "https://1rpc.io/base", "https://base.meowrpc.com"].filter(Boolean) },
   ];
   const FILE = path.join(dataDir, "lz-state.json");
   let S = {};
@@ -403,7 +403,7 @@ export function startLayerZero(ctx) {
               S.seen[key][c.name] = to;
             };
             await scan("epBlock", [c.rpc, ...c.logsRpcs], ENDPOINT_V2, c.name === "Arbitrum" ? 1000 : 500);
-            try { await scan("epBlockAll", c.logsRpcs, null, c.name === "Arbitrum" ? 500 : 200); }
+            try { await scan("epBlockAll", c.logsRpcs, null, c.name === "Arbitrum" ? 500 : c.name === "Base" ? 60 : 200); }
             catch (e) { console.error(`[lz:endpoint] ${c.name} tüm kontratlar:`, e?.message || e); }
             ok++;
           } catch (e) { console.error(`[lz:endpoint] ${c.name}:`, e?.message || e); }
