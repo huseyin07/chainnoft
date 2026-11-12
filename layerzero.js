@@ -61,9 +61,9 @@ const HEAD = {
 export function startLayerZero(ctx) {
   const { http, gh, send, esc, dataDir, ethRpc } = ctx;
   const CHAINS = [
-    { name: "Ethereum", loc: "Ethereum'daki", rpc: ethRpc, selfEid: 30110, explorer: "https://etherscan.io", logsRpc: process.env.ETH_LOGS_RPC_URL || "https://eth.drpc.org" },   // self-test: Ethereum'daki ZRO'nun Arbitrum peer'ı dolu olmalı
-    { name: "Arbitrum", loc: "Arbitrum'daki", rpc: process.env.ARB_RPC_URL || "https://arbitrum-one-rpc.publicnode.com", selfEid: 30101, explorer: "https://arbiscan.io", logsRpc: process.env.ARB_LOGS_RPC_URL || "https://arbitrum.drpc.org" },
-    { name: "Base", loc: "Base'deki", rpc: process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com", selfEid: 30101, explorer: "https://basescan.org", logsRpc: process.env.BASE_LOGS_RPC_URL || "https://base.drpc.org" },
+    { name: "Ethereum", loc: "Ethereum'daki", rpc: ethRpc, selfEid: 30110, explorer: "https://etherscan.io", logsRpcs: [process.env.ETH_LOGS_RPC_URL, "https://eth.drpc.org", "https://eth.llamarpc.com", "https://ethereum-rpc.publicnode.com"].filter(Boolean) },   // self-test: Ethereum'daki ZRO'nun Arbitrum peer'ı dolu olmalı
+    { name: "Arbitrum", loc: "Arbitrum'daki", rpc: process.env.ARB_RPC_URL || "https://arbitrum-one-rpc.publicnode.com", selfEid: 30101, explorer: "https://arbiscan.io", logsRpcs: [process.env.ARB_LOGS_RPC_URL, "https://arb1.arbitrum.io/rpc", "https://arbitrum.drpc.org", "https://arbitrum.llamarpc.com"].filter(Boolean) },
+    { name: "Base", loc: "Base'deki", rpc: process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com", selfEid: 30101, explorer: "https://basescan.org", logsRpcs: [process.env.BASE_LOGS_RPC_URL, "https://mainnet.base.org", "https://base.llamarpc.com", "https://base.drpc.org"].filter(Boolean) },
   ];
   const FILE = path.join(dataDir, "lz-state.json");
   let S = {};
@@ -376,7 +376,13 @@ export function startLayerZero(ctx) {
             // 2) Olaylar. publicnode adres filtresi olmadan getLogs kabul etmiyor:
             //    (a) EndpointV2'nin kendi olayları ana RPC'den (adresli), (b) tüm kontratlar (ULN ayarları,
             //    her OApp'in PeerSet'i) adres filtresiz sorguyu kabul eden ikinci RPC'den. Ayrı imleçler.
-            const scan = async (key, url, address, span) => {
+            // Sırayla dene: biri reddederse (403/400/limit) sonrakine geç
+            const scan = async (key, urls, address, span) => {
+              let last;
+              for (const url of urls) { try { return await scanOne(key, url, address, span); } catch (e) { last = e; } }
+              throw last;
+            };
+            const scanOne = async (key, url, address, span) => {
               S.seen[key] ??= {};
               const latest = parseInt(await rpc(url, "eth_blockNumber"), 16) - 2; // geride kalan düğümler için pay
               const from = S.seen[key][c.name] ? S.seen[key][c.name] + 1 : latest - 20;
@@ -396,8 +402,8 @@ export function startLayerZero(ctx) {
               }
               S.seen[key][c.name] = to;
             };
-            await scan("epBlock", c.rpc, ENDPOINT_V2, c.name === "Arbitrum" ? 3000 : 1000);
-            try { await scan("epBlockAll", c.logsRpc, null, c.name === "Arbitrum" ? 1000 : 500); }
+            await scan("epBlock", [c.rpc, ...c.logsRpcs], ENDPOINT_V2, c.name === "Arbitrum" ? 1000 : 500);
+            try { await scan("epBlockAll", c.logsRpcs, null, c.name === "Arbitrum" ? 500 : 200); }
             catch (e) { console.error(`[lz:endpoint] ${c.name} tüm kontratlar:`, e?.message || e); }
             ok++;
           } catch (e) { console.error(`[lz:endpoint] ${c.name}:`, e?.message || e); }
