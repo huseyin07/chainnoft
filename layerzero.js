@@ -164,6 +164,34 @@ export function startLayerZero(ctx) {
   // ---------- izleyiciler ----------
   const W = [
     {
+      // Mainnet anı için en hızlı sinyal: bilinen mainnet adresleri şu an 403 dönüyor. 15 sn'de bir, hepsine aynı anda
+      // eth_chainId gönderilir. Cevap 403'ten başka bir şeye dönerse anında haber verilir; zincir cevap verirse GÜÇLÜ SİNYAL.
+      id: "gate", name: "Mainnet kapısı — mainnet.evm.zero… (15 sn)", every: 15,
+      async run() {
+        S.seen.gate ??= {};
+        const hosts = [...new Set([...(S.seen.dnsLive || []), ...ZONE_RPCS.map((u) => new URL(u).host)])]
+          .filter((h) => /(^|\.)mainnet\./.test(h) && !/testnet|devnet/.test(h));
+        await Promise.all(hosts.map(async (h) => {
+          let sig, id = null;
+          try {
+            const r = await http(`https://${h}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }) }, 8000);
+            const t = (await r.text()).slice(0, 2000);
+            try { const j = JSON.parse(t); if (j?.result) id = parseInt(j.result, 16); } catch {}
+            sig = id ? `chain ${id}` : `HTTP ${r.status}`;
+          } catch { return; } // çözülmeyen ad ya da anlık ağ hatası: değişiklik sayılmaz
+          const prev = S.seen.gate[h];
+          S.seen.gate[h] = sig;
+          if (prev === undefined || prev === sig) return;
+          if (id && ![1337, 31337, ...(S.testnetChainIds || [])].includes(id)) {
+            addRpc(`https://${h}`);
+            fireOnce(`gate:${h}:${sig}`, `<b>${esc(h)}</b> artık JSON-RPC cevabı veriyor!\nÖnce: ${esc(prev)}\nŞimdi: <b>chain ID ${id}</b>\n\nRPC: <code>https://${esc(h)}</code>\nZincir testi (blok üretimi, ZRO köprüsü) 1 dakika içinde ayrıca gelecek.`, "strong");
+          } else {
+            fireOnce(`gate:${h}:${prev}>${sig}`, `<code>${esc(h)}</code> cevabı değişti: ${esc(prev)} → <b>${esc(sig)}</b>\n\nKapı açılıyor olabilir; RPC olarak cevap verdiği an güçlü sinyal gelecek.`, "hint");
+          }
+        }));
+      },
+    },
+    {
       id: "peer", name: "ZRO kontratı — Zero peer (Ethereum/Arbitrum/Base)", every: 120,
       async run() {
         S.facts.peers ??= {};
