@@ -36,7 +36,6 @@ const UPBIT_NOTICE_URLS = [
   "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=20&category=all",
   "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=30&category=all",
   "https://api-manager.upbit.com/api/v1/announcements?os=web&page=1&per_page=20",
-  "https://api-manager.upbit.com/api/v1/notices?page=1&per_page=30",
 ];
 const GIWA_WORDS = /giwa|기와/i;
 // GIWA'nın L1 operasyon kayıtları. Yapı: <ağ>/<tarih-iş>/artifacts/<adım>/<L1 chain ID>/<dosya>.json
@@ -91,13 +90,45 @@ async function http(url, opts = {}, timeoutMs = 20000) {
     return await fetch(url, { ...opts, signal: ctrl.signal });
   } finally { clearTimeout(t); }
 }
+// Limit dolunca (403/429) hata değil "bekleme" sayılır: izleyici kırmızıya dönmez, sayaç artmaz,
+// limit sıfırlanana kadar GitHub'a hiç istek atılmaz.
+function rateLimited(msg, until) {
+  const e = new Error(msg);
+  e.rateLimited = true; e.until = until;
+  return e;
+}
+const hhmm = (ms) => new Date(ms).toISOString().slice(11, 16) + " UTC";
+const ghCache = new Map(); // ETag önbelleği: değişmeyen cevap için 304 döner
+let ghPausedUntil = 0;
 async function gh(pathAndQuery) {
+  if (Date.now() < ghPausedUntil) throw rateLimited(`GitHub limiti dolu, ${hhmm(ghPausedUntil)}'ye kadar bekleniyor`, ghPausedUntil);
   const headers = { "Accept": "application/vnd.github+json", "User-Agent": "giwa-mainnet-watch" };
   if (GH_TOKEN) headers.Authorization = `Bearer ${GH_TOKEN}`;
+  const cached = ghCache.get(pathAndQuery);
+  if (cached) headers["If-None-Match"] = cached.etag;
   const r = await http(`https://api.github.com/${pathAndQuery}`, { headers });
+  if (r.status === 304 && cached) return cached.data;
   if (r.status === 404) return null;
+  if (r.status === 403 || r.status === 429) {
+    const body = await r.text().catch(() => "");
+    const remaining = r.headers.get("x-ratelimit-remaining");
+    if (remaining === "0" || /rate limit/i.test(body) || r.headers.get("retry-after")) {
+      const retry = Number(r.headers.get("retry-after")) * 1000;
+      const reset = Number(r.headers.get("x-ratelimit-reset")) * 1000;
+      ghPausedUntil = retry ? Date.now() + retry : reset > Date.now() ? reset + 5000 : Date.now() + 120000;
+      throw rateLimited(`GitHub limiti doldu${GH_TOKEN ? "" : " (GITHUB_TOKEN yok)"}, ${hhmm(ghPausedUntil)}'ye kadar bekleniyor`, ghPausedUntil);
+    }
+    throw new Error(`GitHub ${r.status} ${pathAndQuery}`);
+  }
   if (!r.ok) throw new Error(`GitHub ${r.status} ${pathAndQuery}`);
-  return r.json();
+  const data = await r.json();
+  const etag = r.headers.get("etag");
+  if (etag && !pathAndQuery.includes("/git/trees/")) { // büyük dosya ağaçlarını bellekte tutma
+    ghCache.delete(pathAndQuery);
+    ghCache.set(pathAndQuery, { etag, data });
+    if (ghCache.size > 200) ghCache.delete(ghCache.keys().next().value);
+  }
+  return data;
 }
 async function rpc(url, method, params = []) {
   const r = await http(url, {
@@ -200,8 +231,10 @@ function statusText() {
   for (const w of WATCHERS) {
     const h = state.health[w.id];
     const when = h ? new Date(h.at).toISOString().slice(11, 16) + " UTC" : "henüz yok";
+    if (h?.paused) { lines.push(`⏸️ ${w.name} — <i>${esc(h.paused).slice(0, 120)}</i>`); continue; }
     lines.push(`${h?.ok ? "🟢" : h ? "🔴" : "⚪"} ${w.name} — ${when}${h && !h.ok ? `\n   <i>${esc(h.err).slice(0, 120)}</i>` : ""}`);
   }
+  if (!GH_TOKEN) lines.push("", "<i>GITHUB_TOKEN yok: GitHub izleyicileri 10–30 dakikada bir çalışıyor. Token eklersen 3 dakikaya iner.</i>");
   lines.push("", `<b>Karar:</b> ${assess().verdict}`, "Ayrıntı için /dogrula");
   return lines.join("\n");
 }
@@ -350,7 +383,7 @@ const WATCHERS = [
     },
   },
   {
-    id: "node-repo", name: "GitHub giwa-io/node", everySec: 180,
+    id: "node-repo", name: "GitHub giwa-io/node", everySec: 180, ghEverySec: 600,
     async run() {
       const commits = await gh("repos/giwa-io/node/commits?per_page=5");
       if (!commits?.length) throw new Error("commit listesi boş");
@@ -376,7 +409,7 @@ const WATCHERS = [
     },
   },
   {
-    id: "chainops", name: "GitHub giwa-io/chain-operations (L1 işlemleri)", everySec: 180,
+    id: "chainops", name: "GitHub giwa-io/chain-operations (L1 işlemleri)", everySec: 180, ghEverySec: 600,
     async run() {
       const commits = await gh(`repos/${CHAINOPS}/commits?per_page=10`);
       if (!commits?.length) throw new Error("commit listesi boş");
@@ -413,7 +446,7 @@ const WATCHERS = [
     },
   },
   {
-    id: "org-repos", name: "GitHub giwa-io yeni depolar", everySec: 600,
+    id: "org-repos", name: "GitHub giwa-io yeni depolar", everySec: 600, ghEverySec: 1800,
     async run() {
       const repos = await gh("orgs/giwa-io/repos?per_page=100&sort=created");
       if (!Array.isArray(repos)) throw new Error("depo listesi alınamadı");
@@ -438,7 +471,7 @@ const WATCHERS = [
     },
   },
   {
-    id: "registry", name: "Optimism superchain-registry + chainlist", everySec: 600,
+    id: "registry", name: "Optimism superchain-registry + chainlist", everySec: 600, ghEverySec: 1800,
     async run() {
       const q = encodeURIComponent("giwa repo:ethereum-optimism/superchain-registry repo:ethereum-lists/chains");
       const res = await gh(`search/issues?q=${q}&sort=created&order=desc&per_page=30`);
@@ -517,15 +550,23 @@ const WATCHERS = [
         "Origin": "https://upbit.com",
         "Referer": "https://upbit.com/service_center/notice",
       };
-      let j = null; const tried = [];
+      let j = null; const tried = []; let blocked = false;
       for (const url of UPBIT_NOTICE_URLS) {
+        if (blocked) break;
         const tag = new URL(url).pathname.split("/").pop() + "?" + new URL(url).searchParams.get("per_page");
         try {
           const r = await http(url, { headers });
-          if (!r.ok) { tried.push(`${tag}=HTTP ${r.status}${r.headers.get("server") ? "/" + r.headers.get("server") : ""}`); continue; }
+          if (!r.ok) {
+            const server = r.headers.get("server") || "";
+            tried.push(`${tag}=HTTP ${r.status}${server ? "/" + server : ""}`);
+            // Cloudflare IP engeli tüm adresler için aynı; diğerlerini denemenin anlamı yok
+            if (r.status === 403 && /cloudflare/i.test(server)) blocked = true;
+            continue;
+          }
           j = await r.json(); break;
         } catch (e) { tried.push(`${tag}=${e.message}`); }
       }
+      if (!j && blocked) throw new Error("Upbit (Cloudflare) bu sunucunun IP'sini engelliyor — HTTP 403");
       if (!j) throw new Error(`Upbit duyuruları alınamadı (${tried.join(", ")})`);
       const notices = [];
       (function walk(o) { if (Array.isArray(o)) o.forEach(walk); else if (o && typeof o === "object") { if (typeof o.title === "string") notices.push(o); else Object.values(o).forEach(walk); } })(j);
@@ -696,16 +737,38 @@ async function runWatcher(w, opts = {}) {
     state.health[w.id] = { ok: true, at: Date.now() };
     state.errStreak[w.id] = 0;
   } catch (e) {
+    if (e.rateLimited) {
+      // Limit beklemesi hata değil: sayaç artmaz, bildirim gitmez
+      state.health[w.id] = { ...(state.health[w.id] || {}), paused: e.message, pausedAt: Date.now() };
+      w.until = e.until;
+      if (w.lastLog !== "rl") console.log(`[${w.id}] ${e.message}`);
+      w.lastLog = "rl";
+      saveState();
+      return;
+    }
     state.health[w.id] = { ok: false, at: Date.now(), err: e.message };
-    state.errStreak[w.id] = (state.errStreak[w.id] || 0) + 1;
-    console.error(`[${w.id}]`, e.message);
+    const n = state.errStreak[w.id] = (state.errStreak[w.id] || 0) + 1;
+    // Aynı hatayı her turda basma: ilk seferde, mesaj değişince ve her 10 hatada bir
+    if (n === 1 || n % 10 === 0 || w.lastLog !== e.message) console.error(`[${w.id}] (${n}. kez)`, e.message);
+    w.lastLog = e.message;
     // Kısa kesintileri sessiz geç; 10 kez üst üste düşerse haber ver
-    if (state.errStreak[w.id] === 10 && !w.quiet) notify(`"${w.name}" izleyicisi 10 kez üst üste hata verdi: ${esc(e.message)}`);
+    if (n === 10 && !w.quiet) notify(`"${w.name}" izleyicisi 10 kez üst üste hata verdi: ${esc(e.message)}`);
   }
+  if (w.lastLog === "rl") w.lastLog = null;
   saveState();
 }
+// Sonraki tur: GitHub token'ı yoksa GitHub izleyicileri seyrekleşir (saatte 60 istek limiti),
+// üst üste hatada aralık ikiye katlanır (en fazla 30 dk), limit beklemesinde sıfırlanma anına kadar beklenir.
+function nextDelayMs(w) {
+  const base = Math.max(w.everySec, !GH_TOKEN && w.ghEverySec ? w.ghEverySec : 0);
+  const streak = state.errStreak?.[w.id] || 0;
+  const backoff = streak > 1 ? Math.min(base * 2 ** (streak - 1), Math.max(base, 1800)) : base;
+  const wait = w.until && w.until > Date.now() ? w.until - Date.now() + 1000 : 0;
+  w.until = 0;
+  return Math.max(backoff * 1000, wait) / SPEED;
+}
 function loop(w) {
-  const tick = async () => { await runWatcher(w); setTimeout(tick, (w.everySec * 1000) / SPEED); };
+  const tick = async () => { await runWatcher(w); setTimeout(tick, nextDelayMs(w)); };
   tick();
 }
 function heartbeat() {
@@ -715,7 +778,7 @@ function heartbeat() {
     if (now.getUTCHours() === 9 && state.lastBeat !== day) {
       state.lastBeat = day; saveState();
       // Tek seferlik kesintiler rapora girmesin: en az 3 kez üst üste düşenleri, nedeniyle birlikte göster
-      const broken = WATCHERS.filter((w) => state.health[w.id] && !state.health[w.id].ok && (state.errStreak?.[w.id] || 0) >= 3)
+      const broken = WATCHERS.filter((w) => state.health[w.id] && !state.health[w.id].ok && !state.health[w.id].paused && (state.errStreak?.[w.id] || 0) >= 3)
         .map((w) => `${w.name} — ${esc(String(state.health[w.id].err || "").slice(0, 160))}`);
       notify(`Günlük kontrol: bot çalışıyor.\n${assess().verdict}${broken.length ? `\nHata veren izleyiciler:\n${broken.map((b) => "• " + b).join("\n")}` : ""}`);
     }
@@ -736,7 +799,7 @@ function statusServer() {
     const a = assess();
     const strip = (t) => String(t).replace(/<[^>]+>/g, "");
     const health = Object.fromEntries(
-      WATCHERS.map((w) => [w.name, state.health[w.id] ? (state.health[w.id].ok ? "ok" : "hata") : "bekliyor"]),
+      WATCHERS.map((w) => [w.name, state.health[w.id] ? (state.health[w.id].paused ? "limit bekleniyor" : state.health[w.id].ok ? "ok" : "hata") : "bekliyor"]),
     );
     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({
@@ -770,7 +833,7 @@ async function startLz() {
   if (process.env.LZ_WATCH === "0") return console.log("[lz] kapalı (LZ_WATCH=0)");
   try {
     const m = await import("./layerzero.js");
-    lz = m.startLayerZero({ http, gh, send: sendRaw, esc, dataDir: DATA_DIR, ethRpc: ETH_RPC });
+    lz = m.startLayerZero({ http, gh, send: sendRaw, esc, dataDir: DATA_DIR, ethRpc: ETH_RPC, ghToken: !!GH_TOKEN, rateLimited });
   } catch (e) {
     lz = null;
     console.error("[lz] başlatılamadı, GIWA izleme etkilenmedi:", e);

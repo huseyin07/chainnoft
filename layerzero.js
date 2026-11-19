@@ -11,6 +11,7 @@
 //   LZ_WATCH        0 ise modül hiç başlamaz
 //   ARB_RPC_URL     Arbitrum RPC (varsayılan publicnode)
 //   BASE_RPC_URL    Base RPC (varsayılan publicnode)
+//   CERTSPOTTER_API_KEY  Cert Spotter anahtarı (ücretsiz). Yoksa saatte birkaç sorguyla sınırlı kalır
 
 import fs from "node:fs";
 import path from "node:path";
@@ -59,7 +60,10 @@ const HEAD = {
 };
 
 export function startLayerZero(ctx) {
-  const { http, gh, send, esc, dataDir, ethRpc } = ctx;
+  const { http, gh, send, esc, dataDir, ethRpc, ghToken = false } = ctx;
+  const rateLimited = ctx.rateLimited || ((msg, until) => Object.assign(new Error(msg), { rateLimited: true, until }));
+  // 429 cevabındaki Retry-After'a göre bekleme süresi (yoksa varsayılan)
+  const retryAt = (r, fallbackSec) => Date.now() + (Number(r.headers.get("retry-after")) || fallbackSec) * 1000;
   const CHAINS = [
     { name: "Ethereum", loc: "Ethereum'daki", rpc: ethRpc, selfEid: 30110, explorer: "https://etherscan.io", logsRpcs: [process.env.ETH_LOGS_RPC_URL, "https://eth.drpc.org", "https://eth.llamarpc.com", "https://ethereum-rpc.publicnode.com"].filter(Boolean) },   // self-test: Ethereum'daki ZRO'nun Arbitrum peer'ı dolu olmalı
     { name: "Arbitrum", loc: "Arbitrum'daki", rpc: process.env.ARB_RPC_URL || "https://arbitrum-one-rpc.publicnode.com", selfEid: 30101, explorer: "https://arbiscan.io", logsRpcs: [process.env.ARB_LOGS_RPC_URL, "https://arb1.arbitrum.io/rpc", "https://arbitrum.drpc.org", "https://arbitrum.llamarpc.com"].filter(Boolean) },
@@ -317,7 +321,7 @@ export function startLayerZero(ctx) {
       },
     },
     {
-      id: "github", name: "GitHub LayerZero-Labs yeni depolar", every: 600,
+      id: "github", name: "GitHub LayerZero-Labs yeni depolar", every: 600, ghEvery: 1800,
       async run() {
         const repos = await gh("orgs/LayerZero-Labs/repos?sort=created&direction=desc&per_page=40");
         if (!repos) throw new Error("org okunamadı");
@@ -456,13 +460,15 @@ export function startLayerZero(ctx) {
       },
     },
     {
-      id: "certspotter", name: "SSL sertifikaları (Cert Spotter, crt.sh yedeği)", every: 300, quiet: true,
+      id: "certspotter", name: "SSL sertifikaları (Cert Spotter, crt.sh yedeği)", every: process.env.CERTSPOTTER_API_KEY ? 300 : 1800, quiet: true,
       async run() {
         let names = [];
         for (const d of CRT_DOMAINS) {
           S.seen.csAfter ??= {};
           const after = S.seen.csAfter[d] ? `&after=${S.seen.csAfter[d]}` : "";
-          const r = await http(`https://api.certspotter.com/v1/issuances?domain=${d}&include_subdomains=true&expand=dns_names${after}`, {}, 30000);
+          const headers = process.env.CERTSPOTTER_API_KEY ? { Authorization: `Bearer ${process.env.CERTSPOTTER_API_KEY}` } : {};
+          const r = await http(`https://api.certspotter.com/v1/issuances?domain=${d}&include_subdomains=true&expand=dns_names${after}`, { headers }, 30000);
+          if (r.status === 429) { const until = retryAt(r, 3600); throw rateLimited(`Cert Spotter limiti doldu, ${new Date(until).toISOString().slice(11, 16)} UTC'ye kadar bekleniyor`, until); }
           if (!r.ok) throw new Error(`certspotter ${r.status}`);
           const j = await r.json();
           for (const c of j) for (const n of c.dns_names || []) names.push(n.toLowerCase().replace(/^\*\./, ""));
@@ -476,7 +482,7 @@ export function startLayerZero(ctx) {
       },
     },
     {
-      id: "ghevents", name: "GitHub LayerZero-Labs etkinlikleri (push/PR/release/branch)", every: 180,
+      id: "ghevents", name: "GitHub LayerZero-Labs etkinlikleri (push/PR/release/branch)", every: 180, ghEvery: 600,
       async run() {
         const ev = await gh("orgs/LayerZero-Labs/events?per_page=100");
         if (!ev) throw new Error("etkinlikler okunamadı");
@@ -523,11 +529,12 @@ export function startLayerZero(ctx) {
       },
     },
     {
-      id: "crt", name: "SSL sertifikaları (crt.sh)", every: 1200, quiet: true,
+      id: "crt", name: "SSL sertifikaları (crt.sh)", every: 3600, quiet: true,
       async run() {
         const names = [];
         for (const d of CRT_DOMAINS) {
           const r = await http(`https://crt.sh/?q=%25.${d}&output=json&exclude=expired`, {}, 120000);
+          if (r.status === 429) { const until = retryAt(r, 3600); throw rateLimited(`crt.sh limiti doldu, ${new Date(until).toISOString().slice(11, 16)} UTC'ye kadar bekleniyor`, until); }
           if (!r.ok) throw new Error(`crt.sh ${r.status}`);
           for (const c of await r.json()) for (const n of String(c.name_value || "").split("\n")) names.push(n.toLowerCase().replace(/^\*\./, ""));
         }
@@ -557,26 +564,48 @@ export function startLayerZero(ctx) {
       S.health[w.id] = { ok: true, at: Date.now() };
       S.errStreak[w.id] = 0;
     } catch (e) {
-      S.health[w.id] = { ok: false, at: Date.now(), err: String(e?.message || e) };
-      S.errStreak[w.id] = (S.errStreak[w.id] || 0) + 1;
-      console.error(`[lz:${w.id}]`, e?.message || e);
-      if (S.errStreak[w.id] === 10 && !w.quiet) notify(`"${w.name}" izleyicisi 10 kez üst üste hata verdi: ${esc(String(e?.message || e))}`);
+      const msg = String(e?.message || e);
+      if (e?.rateLimited) {
+        // Limit beklemesi hata sayılmaz: sayaç artmaz, bildirim gitmez
+        S.health[w.id] = { ...(S.health[w.id] || {}), paused: msg, pausedAt: Date.now() };
+        w.until = e.until;
+        if (w.lastLog !== "rl") console.log(`[lz:${w.id}] ${msg}`);
+        w.lastLog = "rl";
+        save();
+        return;
+      }
+      S.health[w.id] = { ok: false, at: Date.now(), err: msg };
+      const n = S.errStreak[w.id] = (S.errStreak[w.id] || 0) + 1;
+      if (n === 1 || n % 10 === 0 || w.lastLog !== msg) console.error(`[lz:${w.id}] (${n}. kez)`, msg);
+      w.lastLog = msg;
+      if (n === 10 && !w.quiet) notify(`"${w.name}" izleyicisi 10 kez üst üste hata verdi: ${esc(msg)}`);
     }
+    if (w.lastLog === "rl") w.lastLog = null;
     save();
   }
-  const loops = [];
+  // Sonraki tur: token yoksa GitHub izleyicileri seyrek, üst üste hatada aralık ikiye katlanır (en fazla 30 dk),
+  // limit beklemesinde sıfırlanma anına kadar beklenir
+  const nextDelayMs = (w) => {
+    const base = Math.max(w.every, !ghToken && w.ghEvery ? w.ghEvery : 0);
+    const streak = S.errStreak?.[w.id] || 0;
+    const backoff = streak > 1 ? Math.min(base * 2 ** (streak - 1), Math.max(base, 1800)) : base;
+    const wait = w.until && w.until > Date.now() ? w.until - Date.now() + 1000 : 0;
+    w.until = 0;
+    return Math.max(backoff * 1000, wait);
+  };
   for (const w of W) {
     const tick = async () => {
       try { await runOne(w); } catch (e) { console.error("[lz] beklenmeyen:", e); }
-      loops.push(setTimeout(tick, w.every * 1000));
+      setTimeout(tick, nextDelayMs(w));
     };
-    loops.push(setTimeout(tick, 3000 + W.indexOf(w) * 2000)); // GIWA başlangıcını yavaşlatmamak için kademeli
+    setTimeout(tick, 3000 + W.indexOf(w) * 2000); // GIWA başlangıcını yavaşlatmamak için kademeli
   }
 
   function status() {
     const lines = ["<b>LayerZero / Zero izleme</b>"];
     for (const w of W) {
       const h = S.health[w.id];
+      if (h?.paused) { lines.push(`⏸️ ${w.name} — <i>${esc(h.paused).slice(0, 120)}</i>`); continue; }
       const when = h ? new Date(h.at).toISOString().slice(11, 16) + " UTC" : "henüz yok";
       lines.push(`${h?.ok ? "🟢" : h ? "🔴" : "⚪"} ${w.name} — ${when}${h && !h.ok ? `\n   <i>${esc(h.err).slice(0, 120)}</i>` : ""}`);
     }
