@@ -28,9 +28,12 @@ const DOCS_CHAIN = "https://docs.layerzero.network/chain.md";
 const DOCS_INDEX = "https://docs.layerzero.network/llms.txt";
 const CRT_DOMAINS = ["layerzero.network", "layerzero-api.com"];
 // Testnet RPC'si metadata'da testnet.zero.layerzero.network olarak duruyor; mainnet büyük ihtimalle aynı alan adı altında olacak
-const GUESSED_RPCS = ["https://rpc.zero.layerzero.network", "https://mainnet.zero.layerzero.network", "https://zero.layerzero.network", "https://rpc.atlas.zero.layerzero.network", "https://interop.zero.layerzero.network"];
+// Zero "zone" yapısında: genel EVM bölgesi, ödeme ve trading bölgeleri. İlk görülen mainnet adı: mainnet.evm.zero.layerzero.network
+const ZONES = ["evm", "payments", "payment", "trading", "private", "general"];
+const ZONE_RPCS = ZONES.flatMap((z) => [`https://mainnet.${z}.zero.layerzero.network`, `https://rpc.mainnet.${z}.zero.layerzero.network`, `https://rpc.${z}.zero.layerzero.network`, `https://${z}.zero.layerzero.network`]);
+const GUESSED_RPCS = [...ZONE_RPCS, "https://rpc.zero.layerzero.network", "https://mainnet.zero.layerzero.network", "https://zero.layerzero.network", "https://rpc.atlas.zero.layerzero.network", "https://interop.zero.layerzero.network"];
 // DNS'te düzenli olarak denenecek adlar: biri ilk kez çözülmeye başlarsa uyarı
-const DNS_BASES = ["zero.layerzero.network", "mainnet.zero.layerzero.network"];
+const DNS_BASES = ["zero.layerzero.network", "mainnet.zero.layerzero.network", ...ZONES.flatMap((z) => [`${z}.zero.layerzero.network`, `mainnet.${z}.zero.layerzero.network`])];
 const DNS_PREFIXES = ["", "rpc", "ws", "wss", "explorer", "scan", "bridge", "app", "api", "faucet", "status", "portal", "gateway", "indexer", "archive", "prover", "stake", "mainnet", "testnet", "devnet",
   "rpc-mainnet", "mainnet-rpc", "node", "nodes", "chain", "blockscout", "stats", "explorer-api", "api-explorer", "bridge-api", "graph", "subgraph", "dvn", "executor", "relayer", "og", "da", "sequencer", "docs", "www", "launch", "claim", "airdrop"];
 const DNS_EXTRA = ["atlas.layerzero.network", "rpc.atlas.layerzero.network", "explorer.atlas.layerzero.network", "zeroscan.layerzero.network", "zero-rpc.layerzero.network", "rpc-zero.layerzero.network", "interop.zero.layerzero.network", "rpc.interop.zero.layerzero.network"];
@@ -331,7 +334,7 @@ export function startLayerZero(ctx) {
       },
     },
     {
-      id: "dns", name: "Zero alt alan adları (DNS)", every: 60,
+      id: "dns", name: "Zero alt alan adları (DNS, zone dahil)", every: 120,
       async run() {
         const resolves = async (h) => {
           try { return (await dns.resolve4(h)).length > 0; } catch (e) {
@@ -352,7 +355,7 @@ export function startLayerZero(ctx) {
         const prev = new Set(S.seen.dnsLive || []);
         const added = live.filter((h) => !prev.has(h));
         S.seen.dnsLive = [...new Set([...prev, ...live])];
-        for (const h of live) if (/(^|\.)(rpc|ws|wss)\./.test(h) && !/testnet|devnet/.test(h)) S.seen.rpcCandidates = [...new Set([...(S.seen.rpcCandidates || []), `https://${h}`])];
+        for (const h of live) if ((/(^|\.)(rpc|ws|wss)\./.test(h) || /^mainnet\./.test(h)) && !/testnet|devnet/.test(h)) S.seen.rpcCandidates = [...new Set([...(S.seen.rpcCandidates || []), `https://${h}`])];
         if (!added.length) return;
         const list = added.map((h) => `• <code>${esc(h)}</code>${/testnet|devnet/.test(h) ? " (test)" : ""}`).join("\n");
         notify(first
@@ -460,7 +463,7 @@ export function startLayerZero(ctx) {
       },
     },
     {
-      id: "certspotter", name: "SSL sertifikaları (Cert Spotter, crt.sh yedeği)", every: process.env.CERTSPOTTER_API_KEY ? 300 : 1800, quiet: true,
+      id: "certspotter", name: "SSL sertifikaları (Cert Spotter, crt.sh yedeği)", every: process.env.CERTSPOTTER_API_KEY ? 300 : 1800,
       async run() {
         let names = [];
         for (const d of CRT_DOMAINS) {
@@ -477,7 +480,7 @@ export function startLayerZero(ctx) {
         const sub = (n) => { const d = CRT_DOMAINS.find((x) => n === x || n.endsWith("." + x)); return d ? n.slice(0, -d.length).replace(/\.$/, "") : n; };
         names = [...new Set(names)].filter((n) => { const x = sub(n); return x && !/(^|\.)(testnet|sepolia|devnet|staging)(\.|$)/.test(x) && (ZERO_WORDS.test(x) || /(^|\.)(rpc|explorer|scan|bridge|mainnet)([.-]|$)/.test(x)); });
         const added = diffSetCumulative("crt2", names); // crt.sh ile aynı liste: aynı ad iki kez bildirilmez
-        for (const n of added) if (/rpc/.test(n)) addRpc(`https://${n}`);
+        for (const n of added) if (/rpc|mainnet/.test(n)) addRpc(`https://${n}`);
         if (added.length) notify(`LayerZero alan adlarında yeni sertifika (Cert Spotter):\n${added.slice(0, 10).map((n) => `• <code>${esc(n)}</code>`).join("\n")}`, "hint");
       },
     },
@@ -548,7 +551,7 @@ export function startLayerZero(ctx) {
         });
         const added = diffSetCumulative("crt2", interesting);
         if (added.length) {
-          for (const n of added) if (/rpc/.test(n)) S.seen.rpcCandidates = [...new Set([...(S.seen.rpcCandidates || []), `https://${n}`])];
+          for (const n of added) if (/rpc|mainnet/.test(n)) S.seen.rpcCandidates = [...new Set([...(S.seen.rpcCandidates || []), `https://${n}`])];
           notify(`LayerZero alan adlarında yeni sertifika alındı:\n${added.slice(0, 10).map((n) => `• <code>${esc(n)}</code>`).join("\n")}${added.some((n) => /rpc/.test(n)) ? "\n\nRPC adresleri dakikalık denemeye eklendi." : ""}`, "hint");
         }
       },
