@@ -31,6 +31,12 @@ const CRT_DOMAINS = ["layerzero.network", "layerzero-api.com"];
 // Zero "zone" yapısında: genel EVM bölgesi, ödeme ve trading bölgeleri. İlk görülen mainnet adı: mainnet.evm.zero.layerzero.network
 const ZONES = ["evm", "payments", "payment", "trading", "private", "general"];
 const ZONE_RPCS = ZONES.flatMap((z) => [`https://mainnet.${z}.zero.layerzero.network`, `https://rpc.mainnet.${z}.zero.layerzero.network`, `https://rpc.${z}.zero.layerzero.network`, `https://${z}.zero.layerzero.network`]);
+// Resmi kaynaklarda görülen gerçek adresler: rudolph = Zero Interop Zone (33002) RPC'si (LayerZero'nun Safe'e açtığı #1499),
+// diğerleri 19–21 Kasım sertifikaları. Şu an hepsi 403 (izinli IP / x-api-key); kapı açıldığı an yakalanmalı.
+const KNOWN_RPCS = ["https://rudolph.zero.layerzero.network", "https://exoware.rudolph.zero.layerzero.network", "https://rpc.evm.zero.layerzero.network", "https://archive.evm.zero.layerzero.network", "https://mainnet.evm.zero.layerzero.network", "https://archive.mainnet.evm.zero.layerzero.network"];
+const ZERO_MAINNET_IDS = [33000, 33001, 33002, 33003, 33004];
+const ZERO_TESTNET_IDS = [43000, 43001, 43002, 43003, 43004];
+const GATE_SKIP = /(^|[.-])(testnet|sepolia|devnet|staging|explorer|scan|store|store-api|docs|www|stake|status|faucet|app|portal|blog)([.-]|$)/;
 const GUESSED_RPCS = [...ZONE_RPCS, "https://rpc.zero.layerzero.network", "https://mainnet.zero.layerzero.network", "https://zero.layerzero.network", "https://rpc.atlas.zero.layerzero.network", "https://interop.zero.layerzero.network"];
 // DNS'te düzenli olarak denenecek adlar: biri ilk kez çözülmeye başlarsa uyarı
 const DNS_BASES = ["zero.layerzero.network", "mainnet.zero.layerzero.network", ...ZONES.flatMap((z) => [`${z}.zero.layerzero.network`, `mainnet.${z}.zero.layerzero.network`])];
@@ -60,6 +66,7 @@ const HEAD = {
   hint: "🟣🔎 <b>LayerZero — İpucu, doğrulanmadı</b>\n\n",
   strong: "🟣🟠 <b>LayerZero ZERO — GÜÇLÜ SİNYAL</b>\n\n",
   confirmed: "🟣🚨 <b>ZERO AĞI CANLI — ZİNCİR ÜSTÜNDE DOĞRULANDI</b>\n\n",
+  rpc: "🚨🟢 <b>ZERO RPC AÇILDI</b>\n\n",
 };
 
 export function startLayerZero(ctx) {
@@ -85,9 +92,26 @@ export function startLayerZero(ctx) {
     } catch (e) { console.error("[lz] durum kaydedilemedi:", e.message); }
   };
 
+  // Aynı olay birkaç zincirde birkaç saniye arayla görünür (ör. ZRO peer'ı Ethereum/Arbitrum/Base'e aynı anda eklenir).
+  // Güçlü sinyaller 10 sn toplanıp TEK mesajda gider; durum özeti bir kez eklenir.
+  let strongBuf = [], strongTimer = null;
+  const flushStrong = () => {
+    strongTimer = null;
+    const items = strongBuf; strongBuf = [];
+    if (!items.length) return;
+    const head = items.length > 1 ? `🟣🟠 <b>LayerZero ZERO — GÜÇLÜ SİNYAL (${items.length} olay)</b>\n\n` : HEAD.strong;
+    const msg = head + items.map((t, i) => (items.length > 1 ? `<b>${i + 1})</b> ` : "") + t).join("\n\n") + "\n\n" + factsText() + SAFETY;
+    try { send(msg); } catch (e) { console.error("[lz] gönderim:", e.message); }
+  };
   const notify = (text, level = "info") => {
+    if (level === "strong") {
+      strongBuf.push(text);
+      strongTimer ??= setTimeout(flushStrong, 10000);
+      return;
+    }
     let msg = (HEAD[level] || HEAD.info) + text;
-    if (level === "strong" || level === "confirmed") msg += "\n\n" + factsText() + SAFETY;
+    if (level === "confirmed") msg += "\n\n" + factsText() + SAFETY;
+    else if (level === "rpc") msg += "\n\n<i>Cüzdana eklemeden önce adresin *.layerzero.network ile bittiğini kontrol et.</i>" + SAFETY;
     else if (level === "hint") msg += "\n\n<i>Tek başına ağın açıldığı anlamına gelmez. Durum için /lz</i>";
     try { send(msg); } catch (e) { console.error("[lz] gönderim:", e.message); }
   };
@@ -143,7 +167,7 @@ export function startLayerZero(ctx) {
     const ep = Object.entries(f.endpoint || {}).filter(([, v]) => v?.sendLib || v?.supported);
     row(ep.length ? true : false, ep.length ? `EndpointV2'de Zero yolu ayarlı: ${ep.map(([k]) => k).join(", ")}` : "EndpointV2'de Zero için varsayılan kütüphane yok (yol açılmadı)");
     if (f.oappPeers?.length) row(true, `Zero'ya peer ekleyen uygulamalar: ${f.oappPeers.slice(0, 5).map((x) => `<code>${esc(x)}</code>`).join(", ")}`);
-    if (f.metadata) row(true, `LayerZero metadata'da: <b>${esc(f.metadata.key)}</b>${f.metadata.chainId ? ` · chain ID ${f.metadata.chainId}` : ""}${f.metadata.eids?.length ? ` · EID ${f.metadata.eids.join(", ")}` : ""}`);
+    if (f.metadata) row(true, `LayerZero metadata'da: <b>${esc(f.metadata.key)}</b>${f.metadata.chainId ? ` · chain ID ${f.metadata.chainId}` : ""}${f.metadata.eids?.length ? ` · EID ${f.metadata.eids.join(", ")}` : ""}${f.metadata.status ? ` · <b>${esc(f.metadata.status)}</b>` : ""}`);
     else if (f.metaPlaceholders?.length) row(null, `Metadata'da boş Zero kayıtları var (${esc(f.metaPlaceholders.join(", "))}) — EID/chain ID/RPC henüz yok`);
     else row(false, "LayerZero metadata API'sinde Zero kaydı yok");
     if (f.metaTestnets?.length) row(null, `Zero testnetleri: ${esc(f.metaTestnets.join("; "))}`);
@@ -166,28 +190,42 @@ export function startLayerZero(ctx) {
     {
       // Mainnet anı için en hızlı sinyal: bilinen mainnet adresleri şu an 403 dönüyor. 15 sn'de bir, hepsine aynı anda
       // eth_chainId gönderilir. Cevap 403'ten başka bir şeye dönerse anında haber verilir; zincir cevap verirse GÜÇLÜ SİNYAL.
-      id: "gate", name: "Mainnet kapısı — mainnet.evm.zero… (15 sn)", every: 15,
+      // En hızlı sinyal: Zero'nun bilinen ve sonradan bulunan TÜM RPC adayları (rudolph, rpc.evm, archive.evm, mainnet.evm,
+      // sertifika/DNS/metadata'dan gelenler) 5 sn'de bir aynı anda eth_chainId ile yoklanır. Zincir cevap verdiği ilk turda
+      // (önceki durum ne olursa olsun) kısa "ZERO RPC AÇILDI" mesajı + 2 hatırlatma gider; blok/köprü testi "rpc" izleyicisinde.
+      id: "gate", name: "Zero RPC kapısı — tüm adaylar (5 sn)", every: 5,
       async run() {
         S.seen.gate ??= {};
-        const hosts = [...new Set([...(S.seen.dnsLive || []), ...ZONE_RPCS.map((u) => new URL(u).host)])]
-          .filter((h) => /(^|\.)mainnet\./.test(h) && !/testnet|devnet/.test(h));
+        const fromUrls = (list) => (list || []).map((u) => { try { return new URL(u).host; } catch { return null; } }).filter(Boolean);
+        const hosts = [...new Set([
+          ...fromUrls(KNOWN_RPCS), ...fromUrls(ZONE_RPCS), ...fromUrls(S.seen.rpcCandidates),
+          ...(S.seen.dnsLive || []), ...(S.seen.crt2 || []),
+        ])].filter((h) => /(^|\.)zero\.layerzero\.network$|(^|\.)atlas\.layerzero\.network$/.test(h) && !GATE_SKIP.test(h.replace(/\.(zero|atlas)\.layerzero\.network$/, "")));
         await Promise.all(hosts.map(async (h) => {
           let sig, id = null;
           try {
-            const r = await http(`https://${h}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }) }, 8000);
+            const r = await http(`https://${h}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }) }, 4000);
             const t = (await r.text()).slice(0, 2000);
             try { const j = JSON.parse(t); if (j?.result) id = parseInt(j.result, 16); } catch {}
             sig = id ? `chain ${id}` : `HTTP ${r.status}`;
           } catch { return; } // çözülmeyen ad ya da anlık ağ hatası: değişiklik sayılmaz
           const prev = S.seen.gate[h];
           S.seen.gate[h] = sig;
-          if (prev === undefined || prev === sig) return;
-          if (id && ![1337, 31337, ...(S.testnetChainIds || [])].includes(id)) {
+          if (id) {
+            const testnet = [1337, 31337, ...ZERO_TESTNET_IDS, ...(S.testnetChainIds || [])].includes(id);
+            if (testnet) { fireOnce(`gate:test:${h}:${id}`, `<code>${esc(h)}</code> RPC cevabı veriyor ama chain ID ${id} testnet — mainnet değil.`, "info"); return; }
+            if (S.fired[`gate:${h}:${sig}`]) return;
             addRpc(`https://${h}`);
-            fireOnce(`gate:${h}:${sig}`, `<b>${esc(h)}</b> artık JSON-RPC cevabı veriyor!\nÖnce: ${esc(prev)}\nŞimdi: <b>chain ID ${id}</b>\n\nRPC: <code>https://${esc(h)}</code>\nZincir testi (blok üretimi, ZRO köprüsü) 1 dakika içinde ayrıca gelecek.`, "strong");
-          } else {
-            fireOnce(`gate:${h}:${prev}>${sig}`, `<code>${esc(h)}</code> cevabı değişti: ${esc(prev)} → <b>${esc(sig)}</b>\n\nKapı açılıyor olabilir; RPC olarak cevap verdiği an güçlü sinyal gelecek.`, "hint");
+            const known = ZERO_MAINNET_IDS.includes(id) ? (id === 33002 ? "Zero Interop Zone (ana ağ)" : "Zero ana ağ bölgesi") : "bilinmeyen zincir — dikkat";
+            const text = `RPC: <code>https://${esc(h)}</code>\nChain ID: <b>${id}</b> · ${known}\nÖnce: ${esc(prev || "ilk yoklama")}\n\nBlok üretimi ve ZRO köprüsü testi 30 sn içinde ayrıca gelecek.`;
+            fireOnce(`gate:${h}:${sig}`, text, "rpc");
+            setTimeout(() => notify(`⏰ Hatırlatma: <code>https://${esc(h)}</code> açık (chain ID ${id}).`, "rpc"), 30000);
+            setTimeout(() => notify(`⏰ Hatırlatma 2: <code>https://${esc(h)}</code> hâlâ kayıtlı (chain ID ${id}). Durum: /lz`, "info"), 120000);
+            const rw = W.find((x) => x.id === "rpc"); if (rw) runOne(rw).catch(() => {});
+            return;
           }
+          if (prev === undefined || prev === sig) return;
+          fireOnce(`gate:${h}:${prev}>${sig}`, `<code>${esc(h)}</code> cevabı değişti: ${esc(prev)} → <b>${esc(sig)}</b>\n\nKapı açılıyor olabilir; RPC olarak cevap verdiği an ayrı mesaj gelecek.`, "hint");
         }));
       },
     },
@@ -256,7 +294,7 @@ export function startLayerZero(ctx) {
       },
     },
     {
-      id: "metadata", name: "LayerZero metadata API", every: 600,
+      id: "metadata", name: "LayerZero metadata API", every: 300,
       async run() {
         const r = await http(METADATA_URL, {}, 60000);
         if (!r.ok) throw new Error(`metadata ${r.status}`);
@@ -272,6 +310,14 @@ export function startLayerZero(ctx) {
           const chainId = v?.chainDetails?.nativeChainId ?? null;
           const rpcs = (v?.rpcs || []).map((x) => x?.url).filter((u) => /^https:\/\//.test(u || ""));
           const ep = (v?.deployments || []).find((d) => d.endpointV2?.address)?.endpointV2?.address;
+          // chainStatus (ör. ACTIVE) değişimi ayrı sinyal: arkadaşın botunun "zerointerop/mainnet/ACTIVE" satırı buradan
+          const st = v?.chainDetails?.chainStatus || (v?.deployments || []).find((d) => d.chainStatus)?.chainStatus || null;
+          if (st) {
+            S.seen.metaStatus ??= {};
+            const p = S.seen.metaStatus[key];
+            S.seen.metaStatus[key] = st;
+            if (p && p !== st) fireOnce(`meta:status:${key}:${p}>${st}`, `LayerZero metadata'sında <b>${esc(key)}</b> durumu değişti: ${esc(p)} → <b>${esc(st)}</b>`, /testnet|sandbox/i.test(key) ? "info" : "strong");
+          }
           const details = `${chainId ? `\nChain ID: ${chainId}` : ""}${rpcs.length ? `\nRPC: ${rpcs.map((u) => `<code>${esc(u)}</code>`).join(", ")}` : ""}${ep ? `\nEndpointV2: <code>${esc(ep)}</code>` : ""}`;
           if (/testnet|sandbox/i.test(key) || (eids.length && !mainnetEids.length)) {
             if (chainId) S.testnetChainIds = [...new Set([...(S.testnetChainIds || []), Number(chainId)])];
@@ -286,7 +332,7 @@ export function startLayerZero(ctx) {
             fireOnce(`meta:${key}:${chainId}:${rpcs.join(",")}`, `LayerZero metadata'sında Zero için <b>boş bir kayıt</b> var: <code>${esc(key)}</code> (EID, chain ID ve RPC henüz yok). İçi dolduğunda güçlü sinyal gelecek.`, "info");
             continue;
           }
-          S.facts.metadata = { key, chainId, eids: mainnetEids, rpcs, endpoint: ep || null };
+          S.facts.metadata = { key, chainId, eids: mainnetEids, rpcs, endpoint: ep || null, status: st };
           for (const e of mainnetEids) if (!S.zeroEids.includes(e)) S.zeroEids.push(e);
           S.seen.rpcCandidates = [...new Set([...(S.seen.rpcCandidates || []), ...rpcs])];
           fireOnce(`meta:${key}:${chainId}:${rpcs.join(",")}`, `LayerZero metadata API'sinde Zero kaydı:\nAnahtar: <b>${esc(key)}</b>\nEID: ${mainnetEids.join(", ") || "?"}\nChain ID: ${chainId ?? "?"}\nEndpointV2: <code>${esc(ep || "?")}</code>\nRPC: ${rpcs.length ? rpcs.map((u) => `<code>${esc(u)}</code>`).join(", ") : "yok"}\n\nRPC'ler her dakika denenecek.`, "strong");
@@ -294,9 +340,9 @@ export function startLayerZero(ctx) {
       },
     },
     {
-      id: "rpc", name: "Zero RPC denemesi", every: 60,
+      id: "rpc", name: "Zero RPC denemesi (blok + köprü testi)", every: 30,
       async run() {
-        const list = [...new Set([...(S.seen.rpcCandidates || []), ...GUESSED_RPCS])].filter((u) => !/testnet|sepolia/i.test(u));
+        const list = [...new Set([...KNOWN_RPCS, ...(S.seen.rpcCandidates || []), ...GUESSED_RPCS])].filter((u) => !/testnet|sepolia/i.test(u));
         for (const url of list) {
           let id;
           try { id = parseInt(await rpc(url, "eth_chainId"), 16); } catch { continue; }
@@ -508,7 +554,7 @@ export function startLayerZero(ctx) {
         const sub = (n) => { const d = CRT_DOMAINS.find((x) => n === x || n.endsWith("." + x)); return d ? n.slice(0, -d.length).replace(/\.$/, "") : n; };
         names = [...new Set(names)].filter((n) => { const x = sub(n); return x && !/(^|\.)(testnet|sepolia|devnet|staging)(\.|$)/.test(x) && (ZERO_WORDS.test(x) || /(^|\.)(rpc|explorer|scan|bridge|mainnet)([.-]|$)/.test(x)); });
         const added = diffSetCumulative("crt2", names); // crt.sh ile aynı liste: aynı ad iki kez bildirilmez
-        for (const n of added) if (/rpc|mainnet/.test(n)) addRpc(`https://${n}`);
+        for (const n of added) if (/rpc|mainnet|evm|rudolph/.test(n) || /\.zero\.layerzero\.network$/.test(n)) addRpc(`https://${n}`);
         if (added.length) notify(`LayerZero alan adlarında yeni sertifika (Cert Spotter):\n${added.slice(0, 10).map((n) => `• <code>${esc(n)}</code>`).join("\n")}`, "hint");
       },
     },
